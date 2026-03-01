@@ -152,6 +152,22 @@ function extractInferenceTurn(step) {
   return turn;
 }
 
+// Merge consecutive same-role turns (e.g. multiple assistant tool-call steps)
+function mergeConsecutiveTurns(turns) {
+  const merged = [];
+  for (const turn of turns) {
+    const prev = merged.at(-1);
+    if (prev && prev.role === turn.role && turn.role === "assistant") {
+      prev.content = prev.content + "\n\n" + turn.content;
+      if (turn.thinking) prev.thinking = (prev.thinking ? prev.thinking + "\n\n" : "") + turn.thinking;
+      if (turn.model) prev.model = turn.model;
+    } else {
+      merged.push({ ...turn });
+    }
+  }
+  return merged;
+}
+
 async function handleSyncRecords(threads, messages) {
   if (!threads && !messages) return;
 
@@ -204,8 +220,6 @@ async function handleSyncRecords(threads, messages) {
     if (entry._processedMsgIds.includes(msgId)) continue;
 
     if (!step.type && msg.role === "editor") {
-      // Editor-role messages without a step have no content (cached stub).
-      // Real user messages arrive with step.type === "user" and contain text.
       entry._processedMsgIds.push(msgId);
     } else if (step.type === "agent-inference") {
       const turn = extractInferenceTurn(step);
@@ -239,18 +253,47 @@ async function handleSyncRecords(threads, messages) {
     entry.updatedAt = Date.now();
   }
 
-  // Sort turns by message order from thread
+  // Sort turns by message order, then merge consecutive same-role turns
   for (const entry of Object.values(store)) {
-    if (!entry.messageOrder?.length || entry.turns.length < 2) continue;
-    const order = entry.messageOrder;
-    entry.turns.sort((a, b) => {
-      const ai = order.indexOf(a.msgId);
-      const bi = order.indexOf(b.msgId);
-      if (ai === -1 && bi === -1) return (a.timestamp ?? 0) - (b.timestamp ?? 0);
-      if (ai === -1) return 1;
-      if (bi === -1) return -1;
-      return ai - bi;
+    if (entry.turns.length < 2) continue;
+    if (entry.messageOrder?.length) {
+      const order = entry.messageOrder;
+      entry.turns.sort((a, b) => {
+        const ai = order.indexOf(a.msgId);
+        const bi = order.indexOf(b.msgId);
+        if (ai === -1 && bi === -1) return (a.timestamp ?? 0) - (b.timestamp ?? 0);
+        if (ai === -1) return 1;
+        if (bi === -1) return -1;
+        return ai - bi;
+      });
+    }
+    entry.turns = mergeConsecutiveTurns(entry.turns);
+  }
+
+  // Dedup: absorb live-capture (traceId-keyed) entries into matching thread entries
+  const threadEntries = Object.values(store).filter((c) => c.threadId);
+  const liveEntries = Object.values(store).filter((c) => !c.threadId);
+  for (const live of liveEntries) {
+    const liveFirstUser = live.turns.find((t) => t.role === "user")?.content;
+    if (!liveFirstUser) continue;
+    const match = threadEntries.find((th) => {
+      if (th.spaceId !== live.spaceId) return false;
+      return th.turns.some((t) => t.role === "user" && t.content === liveFirstUser);
     });
+    if (match) {
+      // Thread entry wins — absorb model/toolCalls from live if missing
+      if (!match.model && live.model) match.model = live.model;
+      if (live.toolCalls?.length) match.toolCalls.push(...live.toolCalls);
+      delete store[live.id];
+      console.debug(`[notion-ai-scraper] merged live ${live.id} into ${match.id}`);
+    }
+  }
+
+  // Auto-title untitled threads from first user message
+  for (const entry of Object.values(store)) {
+    if (entry.title) continue;
+    const firstUser = entry.turns.find((t) => t.role === "user")?.content;
+    if (firstUser) entry.title = firstUser.slice(0, 60).replace(/\s+/g, " ").trim();
   }
 
   await saveStore(store);
@@ -287,6 +330,26 @@ async function clearConversations() {
   return { ok: true };
 }
 
+// ── Filename helpers ───────────────────────────────────────────────────────
+
+function makeFilename(convo, ext) {
+  const raw = convo?.title
+    || convo?.turns?.find((t) => t.role === "user")?.content
+    || convo?.id
+    || "notion-ai";
+  const slug = raw
+    .slice(0, 48)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const ts = Date.now();
+  return `${slug}-${ts}.${ext}`;
+}
+
+function makeAllFilename(ext) {
+  return `notion-ai-export-${Date.now()}.${ext}`;
+}
+
 // ── Export: Markdown ──────────────────────────────────────────────────────
 
 async function exportMarkdown(conversationId) {
@@ -297,7 +360,8 @@ async function exportMarkdown(conversationId) {
   const md = targets
     .map((c) => {
       const model = c.model ? ` (${c.model})` : "";
-      const header = `# Notion AI Chat${model}\n_Trace: ${c.id}_\n_Captured: ${new Date(c.createdAt).toISOString()}_\n\n`;
+      const title = c.title ? `# ${c.title}${model}` : `# Notion AI Chat${model}`;
+      const header = `${title}\n_ID: ${c.id}_\n_Captured: ${new Date(c.createdAt).toISOString()}_\n\n`;
 
       const body = (c.turns ?? [])
         .map((t) => {
@@ -306,7 +370,6 @@ async function exportMarkdown(conversationId) {
         })
         .join("\n\n---\n\n");
 
-      // Append tool call summary if any
       let toolSection = "";
       if (c.toolCalls?.length) {
         toolSection =
@@ -321,22 +384,21 @@ async function exportMarkdown(conversationId) {
     })
     .join("\n\n===\n\n");
 
-  return { ok: true, content: md, filename: `notion-ai-${Date.now()}.md` };
+  const filename = convo ? makeFilename(convo, "md") : makeAllFilename("md");
+  return { ok: true, content: md, filename };
 }
 
 // ── Export: JSON ──────────────────────────────────────────────────────────
 
 async function exportJSON(conversationId) {
   const store = await loadStore();
-  const data = conversationId
-    ? store[conversationId] ?? {}
+  const convo = conversationId ? store[conversationId] : null;
+  const data = convo
+    ? convo
     : Object.values(store).filter((c) => c.turns?.length > 0);
   const cleaned = JSON.stringify(data, (key, val) =>
     key === "_processedMsgIds" || key === "messageOrder" ? undefined : val
   , 2);
-  return {
-    ok: true,
-    content: cleaned,
-    filename: `notion-ai-${Date.now()}.json`,
-  };
+  const filename = convo ? makeFilename(convo, "json") : makeAllFilename("json");
+  return { ok: true, content: cleaned, filename };
 }

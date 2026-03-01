@@ -8,6 +8,8 @@ Notion's built-in AI chat is not covered by generic export tools. This fills tha
 
 ![icon](icons/icon128.png)
 
+![Demo](docs/demo.gif)
+
 ---
 
 ## Features

@@ -108,7 +108,21 @@ function cleanText(text) {
 function extractRichText(value) {
   if (!Array.isArray(value)) return typeof value === "string" ? value.trim() : null;
   return value
-    .map((chunk) => (Array.isArray(chunk) ? chunk[0] ?? "" : typeof chunk === "string" ? chunk : ""))
+    .map((chunk) => {
+      if (!Array.isArray(chunk)) return typeof chunk === "string" ? chunk : "";
+      const text = chunk[0] ?? "";
+      const annotations = chunk[1];
+      if (text === "\u2023" && Array.isArray(annotations)) {
+        for (const ann of annotations) {
+          if (Array.isArray(ann) && ann.length >= 2) {
+            if (ann[0] === "p") return `[page:${ann[1]}]`;
+            if (ann[0] === "u") return `[user:${ann[1]}]`;
+            if (ann[0] === "a") return `[agent:${ann[1]}]`;
+          }
+        }
+      }
+      return text;
+    })
     .join("").trim() || null;
 }
 

@@ -37,9 +37,13 @@ async function render() {
   if (convos.length === 0) {
     const p = document.createElement("p");
     p.className = "empty-state";
-    p.textContent = "No conversations captured yet.";
-    p.appendChild(document.createElement("br"));
-    p.appendChild(document.createTextNode("Open a Notion page with AI chat."));
+    p.textContent = pageId
+      ? "No conversation captured for this page yet."
+      : "Open a Notion AI chat page to see conversations.";
+    if (pageId) {
+      p.appendChild(document.createElement("br"));
+      p.appendChild(document.createTextNode("Chat with Notion AI to capture it."));
+    }
     list.appendChild(p);
     return;
   }

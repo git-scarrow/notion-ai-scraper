@@ -318,7 +318,7 @@ async function getConversations(pageId) {
   return Object.values(store)
     .filter((c) => {
       if (!c.turns?.length) return false;
-      if (!pageId) return true;
+      if (!pageId) return false;
       const tid = (c.threadId ?? "").replace(/-/g, "");
       return tid === pageId.replace(/-/g, "");
     })

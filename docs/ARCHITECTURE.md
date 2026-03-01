@@ -1,5 +1,17 @@
 # Architecture
 
+This document describes the internal design of Notion AI Chat Scraper and the private Notion AI protocol it reverse-engineers.
+
+## Component overview
+
+| File | World | Role |
+|---|---|---|
+| `content/interceptor.js` | MAIN | Patches `window.fetch`; parses NDJSON + sync responses |
+| `content/bridge.js` | ISOLATED | Relays `postMessage` from MAIN world to background |
+| `background/service-worker.js` | Background | Stores conversations; handles export requests |
+| `popup/popup.js` | Popup | UI: lists conversations, triggers exports |
+| `tampermonkey/notion-ai-scraper.user.js` | Page (unsafeWindow) | Self-contained version of the above for Tampermonkey |
+
 ## How it works
 
 ```

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Notion Agent Manager</title>
+  <link rel="stylesheet" href="agent-manager.css" />
+</head>
+<body>
+  <div class="container">
+
+    <header>
+      <h1>Notion Agent Manager</h1>
+      <div class="header-right">
+        <span id="tab-status" class="status-badge status-unknown">Searching for Notion tab…</span>
+        <button id="btn-refresh" class="btn btn-ghost btn-sm">Refresh</button>
+      </div>
+    </header>
+
+    <div class="controls">
+      <label for="agent-select">Agent</label>
+      <select id="agent-select"></select>
+
+      <div class="controls-right">
+        <button id="btn-dump"         class="btn btn-secondary btn-sm">Dump Current</button>
+        <button id="btn-publish-only" class="btn btn-secondary btn-sm">Publish Only</button>
+      </div>
+    </div>
+
+    <div class="editor">
+      <label for="instructions">Instructions (Markdown)</label>
+      <textarea id="instructions"
+        placeholder="Click 'Dump Current' to load existing instructions, or paste new ones here."></textarea>
+    </div>
+
+    <div class="actions-main">
+      <button id="btn-dry-run" class="btn btn-secondary">Dry Run</button>
+      <button id="btn-update"  class="btn btn-primary">Update + Publish</button>
+    </div>
+
+    <div class="log-pane">
+      <div id="log"></div>
+    </div>
+
+  </div>
+
+  <script src="agent-manager.js" type="module"></script>
+</body>
+</html>

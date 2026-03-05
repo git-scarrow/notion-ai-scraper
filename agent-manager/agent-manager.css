@@ -1,0 +1,184 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  color: #1a1a1a;
+  background: #f7f7f7;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.container {
+  width: 100%;
+  max-width: 760px;
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Header ── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e2e2e2;
+}
+
+h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #111;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-badge {
+  font-size: 11px;
+  border-radius: 10px;
+  padding: 3px 10px;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-ok      { background: #d1fae5; color: #065f46; }
+.status-error   { background: #fee2e2; color: #991b1b; }
+.status-unknown { background: #f0f0f0; color: #555; }
+
+/* ── Controls row ── */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.controls label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #555;
+  white-space: nowrap;
+}
+
+select {
+  font-size: 13px;
+  padding: 5px 8px;
+  border: 1px solid #d0d0d0;
+  border-radius: 5px;
+  background: #fff;
+  color: #111;
+  cursor: pointer;
+}
+
+select:focus { outline: none; border-color: #2383e2; box-shadow: 0 0 0 2px #2383e230; }
+
+.controls-right {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+/* ── Editor ── */
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.editor label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #555;
+}
+
+textarea {
+  width: 100%;
+  height: 320px;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 10px 12px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  background: #fff;
+  color: #1a1a1a;
+  resize: vertical;
+}
+
+textarea:focus { outline: none; border-color: #2383e2; box-shadow: 0 0 0 2px #2383e230; }
+
+textarea::placeholder { color: #aaa; }
+
+/* ── Action buttons ── */
+.actions-main {
+  display: flex;
+  gap: 8px;
+}
+
+.btn {
+  padding: 7px 16px;
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-primary   { background: #2383e2; color: #fff; }
+.btn-primary:hover:not(:disabled)   { background: #1a6bbf; }
+
+.btn-secondary { background: #f0f0f0; color: #333; }
+.btn-secondary:hover:not(:disabled) { background: #e2e2e2; }
+
+.btn-ghost {
+  background: none;
+  border: 1px solid #d0d0d0;
+  color: #555;
+}
+.btn-ghost:hover:not(:disabled) { background: #f5f5f5; border-color: #bbb; }
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+/* ── Log pane ── */
+.log-pane {
+  background: #111;
+  border-radius: 6px;
+  padding: 10px 12px;
+  min-height: 100px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+#log {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-line {
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 11px;
+  color: #ccc;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-ok    { color: #6ee7b7; }
+.log-error { color: #fca5a5; }

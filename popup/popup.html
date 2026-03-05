@@ -7,20 +7,76 @@
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
+
   <header>
-    <h1>Notion AI Scraper</h1>
-    <div id="status-badge" class="badge">0 conversations</div>
+    <div class="wordmark">
+      <svg class="wordmark-icon" viewBox="0 0 16 16" fill="none">
+        <rect x="2" y="2" width="5" height="5" rx="1" fill="currentColor" opacity=".9"/>
+        <rect x="9" y="2" width="5" height="5" rx="1" fill="currentColor" opacity=".5"/>
+        <rect x="2" y="9" width="5" height="5" rx="1" fill="currentColor" opacity=".5"/>
+        <rect x="9" y="9" width="5" height="5" rx="1" fill="currentColor" opacity=".9"/>
+      </svg>
+      Notion Scraper
+    </div>
+    <nav class="tab-bar" role="tablist">
+      <button class="tab active" data-tab="conversations" role="tab" aria-selected="true">Chats</button>
+      <button class="tab" data-tab="agents" role="tab" aria-selected="false">Agents</button>
+    </nav>
   </header>
 
-  <section id="conversation-list">
-    <p class="empty-state">No conversations captured yet.<br />Open a Notion page with AI chat.</p>
-  </section>
+  <div id="confirm-bar" class="confirm-bar hidden">
+    <span id="confirm-msg" class="confirm-msg"></span>
+    <button id="confirm-yes" class="btn-sm btn-danger">Yes</button>
+    <button id="confirm-no"  class="btn-sm">Cancel</button>
+  </div>
 
-  <footer>
-    <button id="btn-export-all-md" class="btn btn-primary">Export All → MD</button>
-    <button id="btn-export-all-json" class="btn btn-secondary">Export All → JSON</button>
-    <button id="btn-clear" class="btn btn-danger">Clear</button>
-  </footer>
+  <!-- ── Conversations tab ─────────────────────────────── -->
+  <div id="tab-conversations" class="tab-panel" role="tabpanel">
+
+    <div class="panel-toolbar">
+      <span id="status-badge" class="badge">0 chats</span>
+      <div class="toolbar-actions">
+        <button id="btn-export-all-md"   class="btn-sm">↓ MD</button>
+        <button id="btn-export-all-json" class="btn-sm">↓ JSON</button>
+        <button id="btn-clear"           class="btn-sm btn-danger">✕</button>
+      </div>
+    </div>
+    <section id="conversation-list">
+      <p class="empty-state">No conversations captured yet.<br/>Open a Notion AI chat page.</p>
+    </section>
+
+  </div>
+
+  <!-- ── Agents tab ────────────────────────────────────── -->
+  <div id="tab-agents" class="tab-panel hidden" role="tabpanel">
+
+    <div class="agent-toolbar">
+      <select id="agent-select"></select>
+      <div class="agent-toolbar-right">
+        <span id="conn-dot" class="conn-dot" title="No Notion tab found"></span>
+        <button id="btn-add-agent"    class="btn-sm">+</button>
+        <button id="btn-rm-agent"     class="btn-sm btn-danger" disabled>−</button>
+        <button id="btn-dump"         class="btn-sm">Dump</button>
+        <button id="btn-publish-only" class="btn-sm">Publish</button>
+      </div>
+    </div>
+
+    <div class="editor-wrap">
+      <div class="editor-label">Instructions — Markdown</div>
+      <textarea id="instructions" spellcheck="false"
+        placeholder="Click Dump to load current instructions…"></textarea>
+    </div>
+
+    <div class="agent-actions">
+      <button id="btn-dry-run" class="btn-sm">Dry Run</button>
+      <button id="btn-update"  class="btn-primary">Update + Publish</button>
+    </div>
+
+    <div id="agent-log" class="log-pane">
+      <span class="log-placeholder">— ready —</span>
+    </div>
+
+  </div>
 
   <script src="popup.js" type="module"></script>
 </body>

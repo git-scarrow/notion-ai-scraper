@@ -196,15 +196,31 @@ def get_block_children(block_id: str, space_id: str,
 
 def get_block_tree(block_id: str, space_id: str,
                    token_v2: str, user_id: str | None = None) -> dict:
-    """Return the full recordMap for a block and all its descendants."""
-    payload = {
-        "pageId": block_id,
-        "limit": 500,
-        "cursor": {"stack": []},
-        "chunkNumber": 0,
-        "verticalColumns": False,
-    }
-    return _post("loadPageChunk", payload, token_v2, user_id)
+    """Return the full recordMap for a block and all its descendants, paginating as needed."""
+    cursor = {"stack": []}
+    merged_blocks: dict = {}
+    first_response: dict | None = None
+
+    while True:
+        payload = {
+            "pageId": block_id,
+            "limit": 500,
+            "cursor": cursor,
+            "chunkNumber": 0,
+            "verticalColumns": False,
+        }
+        data = _post("loadPageChunk", payload, token_v2, user_id)
+        if first_response is None:
+            first_response = data
+        merged_blocks.update(data.get("recordMap", {}).get("block", {}))
+
+        next_cursor = data.get("cursor")
+        if not next_cursor or not next_cursor.get("stack"):
+            break
+        cursor = next_cursor
+
+    first_response.setdefault("recordMap", {})["block"] = merged_blocks
+    return first_response
 
 
 def get_db_automations(db_page_id: str, token_v2: str,
@@ -778,7 +794,15 @@ def get_thread_conversation(thread_id: str, token_v2: str,
         token_v2, user_id,
     )
     results = thread_resp.get("results", [])
-    if not results or not results[0].get("value"):
+    if not results:
+        raise ValueError(f"Thread '{thread_id}' not found.")
+    rec = results[0]
+    if not rec.get("value"):
+        if rec.get("role"):
+            raise ValueError(
+                f"Thread '{thread_id}' exists but its content has been deleted or purged by Notion. "
+                "This happens with old or cleared conversations."
+            )
         raise ValueError(f"Thread '{thread_id}' not found or inaccessible.")
     thread = results[0]["value"]
 
@@ -936,6 +960,7 @@ MODEL_NAMES = {
     "avocado-froyo-medium": "Opus 4.6",
     "almond-croissant-low": "Sonnet 4.6",
     "oatmeal-cookie": "ChatGPT (o-series)",
+    "oval-kumquat-medium": "ChatGPT 5.4",
     "fireworks-minimax-m2.5": "Minimax M2.5",
     "auto": "Auto",
     "unknown": "Auto (default)",

@@ -929,6 +929,182 @@ def search_threads(query: str, space_id: str, token_v2: str,
     return matches
 
 
+# ── Agent tools/modules ───────────────────────────────────────────────────────
+
+# Model codename → display name mapping (discovered from live data)
+MODEL_NAMES = {
+    "avocado-froyo-medium": "Opus 4.6",
+    "almond-croissant-low": "Sonnet 4.6",
+    "oatmeal-cookie": "ChatGPT (o-series)",
+    "fireworks-minimax-m2.5": "Minimax M2.5",
+}
+
+
+def _resolve_page_names(block_ids: list[str], token_v2: str,
+                        user_id: str | None = None) -> dict[str, str]:
+    """Batch-resolve block IDs to page titles (handles collection_view_page)."""
+    if not block_ids:
+        return {}
+    payload = {
+        "requests": [{"id": bid, "table": "block"} for bid in block_ids],
+    }
+    data = _post("getRecordValues", payload, token_v2, user_id)
+    names = {}
+    coll_ids_to_resolve: dict[str, str] = {}  # collection_id -> block_id
+
+    for i, result in enumerate(data.get("results", [])):
+        val = result.get("value", {})
+        title_prop = val.get("properties", {}).get("title", [])
+        if title_prop:
+            names[block_ids[i]] = "".join(c[0] for c in title_prop if c)
+        else:
+            coll_id = val.get("collection_id")
+            if coll_id:
+                coll_ids_to_resolve[coll_id] = block_ids[i]
+            else:
+                names[block_ids[i]] = block_ids[i]
+
+    # Resolve collection_view_page names from collection records
+    if coll_ids_to_resolve:
+        coll_payload = {
+            "requests": [{"id": cid, "table": "collection"} for cid in coll_ids_to_resolve],
+        }
+        coll_data = _post("getRecordValues", coll_payload, token_v2, user_id)
+        for i, result in enumerate(coll_data.get("results", [])):
+            cid = list(coll_ids_to_resolve.keys())[i]
+            bid = coll_ids_to_resolve[cid]
+            coll_val = result.get("value", {})
+            coll_name = coll_val.get("name", [[""]])[0][0] if coll_val.get("name") else cid
+            names[bid] = coll_name
+
+    return names
+
+
+def get_agent_modules(workflow_id: str, token_v2: str,
+                      user_id: str | None = None,
+                      resolve_names: bool = True) -> dict:
+    """
+    Fetch a Notion AI agent's tool/module configuration.
+
+    Returns:
+        {
+          "model": {"type": "avocado-froyo-medium", "display": "Opus 4.6"},
+          "modules": [
+            {
+              "id": str, "name": str, "type": str,
+              ... type-specific fields ...
+            }, ...
+          ]
+        }
+    """
+    wf = get_workflow_record(workflow_id, token_v2, user_id)
+    data = wf.get("data", {})
+
+    model_raw = data.get("model", {})
+    model_type = model_raw.get("type", "unknown")
+
+    modules_raw = data.get("modules", [])
+    modules = []
+
+    # Collect block IDs that need name resolution
+    block_ids_to_resolve: list[str] = []
+
+    for m in modules_raw:
+        mod: dict = {
+            "id": m.get("id"),
+            "name": m.get("name"),
+            "type": m.get("type"),
+        }
+
+        if m.get("type") == "notion":
+            perms = []
+            for p in m.get("permissions", []):
+                ident = p.get("identifier", {})
+                perm = {
+                    "actions": p.get("actions", []),
+                    "scope": ident.get("type"),
+                }
+                if ident.get("blockId"):
+                    perm["blockId"] = ident["blockId"]
+                    block_ids_to_resolve.append(ident["blockId"])
+                perms.append(perm)
+            mod["permissions"] = perms
+
+        elif m.get("type") == "mcpServer":
+            state = m.get("state", {})
+            mod["serverUrl"] = state.get("serverUrl")
+            mod["officialName"] = state.get("officialName")
+            mod["preferredTransport"] = state.get("preferredTransport")
+            mod["runWriteToolsAutomatically"] = state.get("runWriteToolsAutomatically")
+            enabled = state.get("enabledToolNames", [])
+            all_tools = state.get("tools", [])
+            mod["enabledToolNames"] = enabled
+            mod["totalTools"] = len(all_tools)
+            mod["tools"] = [
+                {"name": t["name"], "title": t.get("title", t["name"])}
+                for t in all_tools
+            ]
+            if state.get("connectionPointer"):
+                mod["connectionId"] = state["connectionPointer"].get("id")
+
+        elif m.get("type") == "mail":
+            state = m.get("state", {})
+            mod["scopes"] = state.get("scopes", [])
+            addrs = state.get("emailAddresses", [])
+            mod["emailAddresses"] = [a.get("email") for a in addrs]
+
+        elif m.get("type") == "calendar":
+            state = m.get("state", {})
+            mod["scopes"] = state.get("scopes", [])
+
+        modules.append(mod)
+
+    # Resolve block IDs to page names
+    if resolve_names and block_ids_to_resolve:
+        names = _resolve_page_names(block_ids_to_resolve, token_v2, user_id)
+        for mod in modules:
+            for perm in mod.get("permissions", []):
+                bid = perm.get("blockId")
+                if bid and bid in names:
+                    perm["pageName"] = names[bid]
+
+    return {
+        "model": {"type": model_type, "display": MODEL_NAMES.get(model_type, model_type)},
+        "modules": modules,
+    }
+
+
+def update_agent_modules(workflow_id: str, space_id: str,
+                         modules: list[dict],
+                         token_v2: str, user_id: str | None = None) -> None:
+    """
+    Update a Notion AI agent's modules array via saveTransactionsFanout.
+
+    modules: The full modules array in Notion's internal format.
+    Use get_workflow_record to read the current state, modify, then pass here.
+    """
+    ops = [{
+        "pointer": {"table": "workflow", "id": workflow_id, "spaceId": space_id},
+        "path": ["data", "modules"],
+        "command": "set",
+        "args": modules,
+    }]
+    send_ops(space_id, ops, token_v2, user_id)
+
+
+def update_agent_model(workflow_id: str, space_id: str,
+                       model_type: str,
+                       token_v2: str, user_id: str | None = None) -> None:
+    """Update a Notion AI agent's model selection."""
+    ops = [{
+        "pointer": {"table": "workflow", "id": workflow_id, "spaceId": space_id},
+        "path": ["data", "model"],
+        "command": "set",
+        "args": {"type": model_type},
+    }]
+    send_ops(space_id, ops, token_v2, user_id)
+
+
 # ── Publish ───────────────────────────────────────────────────────────────────
 
 def publish_agent(workflow_id: str, space_id: str,

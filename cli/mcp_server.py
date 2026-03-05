@@ -675,6 +675,219 @@ def get_db_automations(db: str) -> str:
     return "\n".join(lines).strip()
 
 
+@mcp.tool()
+def get_agent_tools(agent_name: str) -> str:
+    """
+    Show the full tool/module configuration for a Notion AI agent.
+
+    Returns the agent's model, Notion page permissions (with page names),
+    MCP server connections (with enabled tools), mail, calendar, and
+    any other configured modules.
+    """
+    cfg = _get_agent_config(agent_name)
+    token, user_id = _get_auth()
+    result = notion_client.get_agent_modules(cfg["workflow_id"], token, user_id)
+
+    lines = [f"Agent: {cfg.get('label', agent_name)}"]
+    model = result.get("model", {})
+    lines.append(f"Model: {model.get('display', '?')} ({model.get('type', '?')})")
+    lines.append("")
+
+    for mod in result.get("modules", []):
+        mtype = mod.get("type", "?")
+        name = mod.get("name", mtype)
+
+        if mtype == "notion":
+            lines.append(f"[Notion] {name}")
+            for perm in mod.get("permissions", []):
+                scope = perm.get("scope", "?")
+                actions = ", ".join(perm.get("actions", []))
+                if scope == "workspacePublic":
+                    lines.append(f"  Workspace public pages — {actions}")
+                else:
+                    page = perm.get("pageName", perm.get("blockId", "?"))
+                    lines.append(f"  {page} — {actions}")
+
+        elif mtype == "mcpServer":
+            url = mod.get("serverUrl", "?")
+            official = mod.get("officialName", "")
+            transport = mod.get("preferredTransport", "?")
+            auto_write = mod.get("runWriteToolsAutomatically", False)
+            enabled = mod.get("enabledToolNames", [])
+            total = mod.get("totalTools", 0)
+            conn_id = mod.get("connectionId", "")
+
+            label = f"[MCP] {name}"
+            if official:
+                label += f" ({official})"
+            lines.append(label)
+            lines.append(f"  URL: {url}")
+            lines.append(f"  Transport: {transport}")
+            lines.append(f"  Auto-run writes: {auto_write}")
+            if conn_id:
+                lines.append(f"  Connection ID: {conn_id}")
+            lines.append(f"  Enabled: {len(enabled)}/{total} tools")
+
+            # List tools with enabled status
+            all_tool_names = {t["name"] for t in mod.get("tools", [])}
+            enabled_set = set(enabled)
+            for t in mod.get("tools", []):
+                status = "ON" if t["name"] in enabled_set else "off"
+                lines.append(f"    [{status}] {t['name']}: {t['title']}")
+
+        elif mtype == "mail":
+            emails = ", ".join(mod.get("emailAddresses", []))
+            scopes = ", ".join(mod.get("scopes", []))
+            lines.append(f"[Mail] {name}")
+            lines.append(f"  Addresses: {emails}")
+            lines.append(f"  Scopes: {scopes}")
+
+        elif mtype == "calendar":
+            scopes = ", ".join(mod.get("scopes", []))
+            lines.append(f"[Calendar] {name}")
+            lines.append(f"  Scopes: {scopes}")
+
+        else:
+            lines.append(f"[{mtype}] {name}")
+
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+@mcp.tool()
+def add_agent_mcp_server(
+    agent_name: str,
+    server_name: str,
+    server_url: str,
+    publish: bool = True,
+) -> str:
+    """
+    Add a custom MCP server to a Notion AI agent's tool configuration.
+
+    agent_name: Registered agent name from agents.yaml.
+    server_name: Display name for the MCP server (e.g. "my-tools").
+    server_url: The MCP server URL (e.g. "https://example.com/mcp").
+    publish: Whether to publish the agent afterward (default: True).
+    """
+    cfg = _get_agent_config(agent_name)
+    token, user_id = _get_auth()
+    wf = notion_client.get_workflow_record(cfg["workflow_id"], token, user_id)
+    modules = wf.get("data", {}).get("modules", [])
+
+    # Check for duplicate
+    for m in modules:
+        if m.get("type") == "mcpServer" and m.get("state", {}).get("serverUrl") == server_url:
+            return f"MCP server at {server_url} is already configured on {agent_name}."
+
+    import uuid as _uuid
+    new_module = {
+        "id": str(_uuid.uuid4()),
+        "name": server_name,
+        "type": "mcpServer",
+        "version": "1.0.0",
+        "state": {
+            "serverUrl": server_url,
+        },
+    }
+    modules.append(new_module)
+    notion_client.update_agent_modules(
+        cfg["workflow_id"], cfg["space_id"], modules, token, user_id,
+    )
+
+    msg = f"Added MCP server '{server_name}' ({server_url}) to {agent_name}."
+    if publish:
+        result = notion_client.publish_agent(
+            cfg["workflow_id"], cfg["space_id"], token, user_id,
+        )
+        msg += f" Published v{result.get('version', '?')}."
+    return msg
+
+
+@mcp.tool()
+def remove_agent_mcp_server(
+    agent_name: str,
+    server_name: str,
+    publish: bool = True,
+) -> str:
+    """
+    Remove an MCP server from a Notion AI agent's tool configuration.
+
+    agent_name: Registered agent name from agents.yaml.
+    server_name: The display name of the MCP server to remove.
+    publish: Whether to publish the agent afterward (default: True).
+    """
+    cfg = _get_agent_config(agent_name)
+    token, user_id = _get_auth()
+    wf = notion_client.get_workflow_record(cfg["workflow_id"], token, user_id)
+    modules = wf.get("data", {}).get("modules", [])
+
+    original_count = len(modules)
+    modules = [
+        m for m in modules
+        if not (m.get("type") == "mcpServer" and m.get("name") == server_name)
+    ]
+
+    if len(modules) == original_count:
+        mcp_names = [m.get("name") for m in modules if m.get("type") == "mcpServer"]
+        return f"No MCP server named '{server_name}' found on {agent_name}. Current: {mcp_names}"
+
+    notion_client.update_agent_modules(
+        cfg["workflow_id"], cfg["space_id"], modules, token, user_id,
+    )
+
+    msg = f"Removed MCP server '{server_name}' from {agent_name}."
+    if publish:
+        result = notion_client.publish_agent(
+            cfg["workflow_id"], cfg["space_id"], token, user_id,
+        )
+        msg += f" Published v{result.get('version', '?')}."
+    return msg
+
+
+@mcp.tool()
+def set_agent_model(
+    agent_name: str,
+    model: str,
+    publish: bool = True,
+) -> str:
+    """
+    Change a Notion AI agent's model.
+
+    agent_name: Registered agent name from agents.yaml.
+    model: Model display name or codename. Accepted values:
+      - "opus" / "avocado-froyo-medium" → Opus 4.6
+      - "sonnet" / "almond-croissant-low" → Sonnet 4.6
+      - "auto" → Auto (Notion picks)
+      - Or any raw codename string.
+    publish: Whether to publish the agent afterward (default: True).
+    """
+    # Resolve friendly names to codenames
+    aliases = {
+        "opus": "avocado-froyo-medium",
+        "opus 4.6": "avocado-froyo-medium",
+        "sonnet": "almond-croissant-low",
+        "sonnet 4.6": "almond-croissant-low",
+        "auto": "auto",
+    }
+    model_type = aliases.get(model.lower().strip(), model.strip())
+
+    cfg = _get_agent_config(agent_name)
+    token, user_id = _get_auth()
+    notion_client.update_agent_model(
+        cfg["workflow_id"], cfg["space_id"], model_type, token, user_id,
+    )
+    display = notion_client.MODEL_NAMES.get(model_type, model_type)
+    msg = f"Set {agent_name} model to {display} ({model_type})."
+
+    if publish:
+        result = notion_client.publish_agent(
+            cfg["workflow_id"], cfg["space_id"], token, user_id,
+        )
+        msg += f" Published v{result.get('version', '?')}."
+    return msg
+
+
 def main():
     mcp.run()
 

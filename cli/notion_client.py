@@ -1072,14 +1072,25 @@ def archive_threads(thread_ids: list[str], space_id: str,
 def archive_workflow_threads(workflow_id: str, space_id: str,
                              token_v2: str, user_id: str | None = None,
                              limit: int = 100) -> dict:
-    """Discover and archive all currently listed threads for a workflow."""
+    """
+    Discover and archive manually-created threads for a workflow.
+
+    Threads created by automated triggers (property-change, schedule) carry a
+    trigger_id. Deleting those threads appears to break the backend subscription
+    that routes future trigger events — the trigger fires but silently drops.
+    Only archive threads with no trigger_id (New Chat / @mention sessions).
+    """
     threads = list_workflow_threads(workflow_id, space_id, token_v2, user_id, limit=limit)
-    thread_ids = [thread["id"] for thread in threads if thread.get("id")]
-    archived_ids = archive_threads(thread_ids, space_id, token_v2, user_id)
+    manual_ids = [
+        thread["id"] for thread in threads
+        if thread.get("id") and not thread.get("trigger_id")
+    ]
+    archived_ids = archive_threads(manual_ids, space_id, token_v2, user_id)
     return {
         "count": len(archived_ids),
         "threadIds": archived_ids,
         "threads": threads,
+        "skippedTriggerThreads": len(threads) - len(manual_ids),
     }
 
 

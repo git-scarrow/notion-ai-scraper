@@ -655,7 +655,8 @@ def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None)
         notion_internal_id=cfg['notion_internal_id'],
         content=message,
         token_v2=token,
-        user_id=user_id
+        user_id=user_id,
+        model=cfg.get('model', 'avocado-froyo-medium')
     )
     
     return (

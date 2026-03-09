@@ -1025,7 +1025,7 @@ def list_workflow_threads(notion_internal_id: str, space_id: str,
 
     while True:
         payload = {
-            "notion_internal_id": notion_internal_id,
+            "workflowId": notion_internal_id,
             "spaceId": space_id,
             "limit": limit,
         }
@@ -1539,6 +1539,7 @@ def add_agent_to_sidebar(space_id: str, notion_internal_id: str,
 
 def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, content: str,
                        token_v2: str, user_id: str | None = None,
+                       model: str = "avocado-froyo-medium",
                        dry_run: bool = False) -> str:
     """
     Append a user message to a Notion AI thread and trigger an inference.
@@ -1584,11 +1585,21 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
     if dry_run:
         return msg_id
 
-    # 2. Trigger inference (Rich transcript payload mirroring UI exactly)
+    # 2. Trigger inference — payload matched from HAR capture of real Dad Lab Bot session
     inference_payload = {
         "traceId": trace_id,
         "spaceId": space_id,
         "threadId": thread_id,
+        "createThread": False,
+        "generateTitle": False,
+        "threadType": "workflow",
+        "isPartialTranscript": True,
+        "asPatchResponse": True,
+        "saveAllThreadOperations": True,
+        "setUnreadState": True,
+        "isUserInAnySalesAssistedSpace": False,
+        "isSpaceSalesAssisted": False,
+        "debugOverrides": {"emitAgentSearchExtractedResults": True, "cachedInferences": {}, "annotationInferences": {}, "emitInferences": False},
         "transcript": [
             {
                 "id": str(uuid.uuid4()),
@@ -1598,29 +1609,70 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
                     "enableAgentAutomations": True,
                     "enableAgentIntegrations": True,
                     "enableCustomAgents": True,
+                    "enableExperimentalIntegrations": False,
+                    "enableAgentViewNotificationsTool": False,
+                    "enableAgentDiffs": True,
+                    "enableAgentCreateDbTemplate": True,
+                    "enableCsvAttachmentSupport": True,
+                    "enableDatabaseAgents": False,
+                    "enableAgentThreadTools": False,
+                    "enableRunAgentTool": False,
+                    "enableAgentDashboards": False,
+                    "enableAgentCardCustomization": True,
+                    "enableSystemPromptAsPage": False,
+                    "enableUserSessionContext": False,
+                    "enableScriptAgentAdvanced": False,
                     "enableScriptAgent": True,
-                    "useWebSearch": True,
+                    "enableScriptAgentSearchConnectorsInCustomAgent": False,
+                    "enableScriptAgentGoogleDriveInCustomAgent": False,
+                    "enableScriptAgentSlack": True,
+                    "enableScriptAgentMcpServers": False,
+                    "enableScriptAgentMail": False,
+                    "enableScriptAgentCalendar": True,
+                    "enableScriptAgentCustomAgentTools": True,
+                    "enableScriptAgentCustomToolCalling": False,
+                    "enableCreateAndRunThread": True,
+                    "enableSpeculativeSearch": False,
+                    "enableQueryCalendar": False,
+                    "enableQueryMail": True,
+                    "enableMailExplicitToolCalls": True,
+                    "enableAgentVerification": False,
+                    "useRulePrioritization": True,
                     "workflowId": notion_internal_id,
                     "availableConnectors": ["notion-mail", "notion-calendar", "github", "linear"],
                     "searchScopes": [{"type": "everything"}],
-                    "model": "avocado-froyo-medium",
+                    "useSearchToolV2": False,
+                    "useWebSearch": True,
+                    "useReadOnlyMode": False,
+                    "writerMode": False,
+                    "model": model,
+                    "modelFromUser": False,
                     "isCustomAgent": True,
+                    "isCustomAgentBuilder": True,
                     "useCustomAgentDraft": True,
-                    "enableUpdatePageAutofixer": True
+                    "use_draft_actor_pointer": False,
+                    "enableUpdatePageAutofixer": True,
+                    "enableMarkdownVNext": False,
+                    "enableUpdatePageOrderUpdates": True,
+                    "enableAgentSupportPropertyReorder": True,
+                    "useServerUndo": True,
+                    "databaseAgentConfigMode": False,
+                    "isOnboardingAgent": False
                 }
             },
             {
                 "id": str(uuid.uuid4()),
                 "type": "context",
                 "value": {
+                    "userId": user_id,
+                    "spaceId": space_id,
+                    "surface": "workflows",
                     "timezone": "America/New_York",
                     "userName": "Sam Scarrow",
-                    "userId": user_id,
-                    "userEmail": "sscarrow@gmail.com",
                     "spaceName": "Sam Scarrow's Notion",
-                    "spaceId": space_id,
+                    "userEmail": "sscarrow@gmail.com",
                     "workflowId": notion_internal_id,
-                    "surface": "custom_agent"
+                    "currentDatetime": now_iso,
                 }
             },
             {
@@ -1631,15 +1683,15 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
                 "createdAt": now_iso
             }
         ],
-        "threadType": "workflow",
-        "isPartialTranscript": True,
-        "asPatchResponse": True,
-        "saveAllThreadOperations": True,
-        "setUnreadState": True
     }
     
-    _post("runInferenceTranscript", inference_payload, token_v2, user_id)
-    
+    try:
+        _post("runInferenceTranscript", inference_payload, token_v2, user_id)
+    except json.JSONDecodeError:
+        # runInferenceTranscript returns NDJSON (streaming), not a single JSON object.
+        # _post's json.loads() fails on multi-line responses — this is expected and safe to ignore.
+        pass
+
     return msg_id
 
 

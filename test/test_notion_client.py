@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "cli"))
 
 import notion_client  # noqa: E402
+import notion_agent_config  # noqa: E402
 
 
 class NotionClientTests(unittest.TestCase):
@@ -148,15 +149,15 @@ class NotionClientTests(unittest.TestCase):
 
     def test_publish_agent_archives_threads_after_success(self) -> None:
         with mock.patch.object(
-            notion_client,
+            notion_agent_config,
             "_post",
             return_value={"workflowArtifactId": "artifact-1", "version": 7},
         ) as post_mock, mock.patch.object(
-            notion_client,
+            notion_agent_config.notion_threads,
             "archive_workflow_threads",
             return_value={"count": 2, "threadIds": ["thread-1", "thread-2"], "threads": []},
         ) as cleanup_mock:
-            result = notion_client.publish_agent("workflow-1", "space-1", "token", "user-1")
+            result = notion_agent_config.publish_agent("workflow-1", "space-1", "token", "user-1")
 
         self.assertEqual(result["workflowArtifactId"], "artifact-1")
         self.assertEqual(result["version"], 7)
@@ -171,33 +172,33 @@ class NotionClientTests(unittest.TestCase):
         )
         cleanup_mock.assert_called_once_with("workflow-1", "space-1", "token", "user-1")
 
-    def test_publish_agent_keeps_warning_and_cleanup(self) -> None:
+    def test_publish_agent_skips_archive_on_warning(self) -> None:
         with mock.patch.object(
-            notion_client,
+            notion_agent_config,
             "_post",
             side_effect=RuntimeError("publishCustomAgentVersion returned incomplete_ancestor_path"),
         ), mock.patch.object(
-            notion_client,
+            notion_agent_config.notion_threads,
             "archive_workflow_threads",
-            return_value={"count": 1, "threadIds": ["thread-1"], "threads": []},
-        ):
-            result = notion_client.publish_agent("workflow-1", "space-1", "token", "user-1")
+        ) as cleanup_mock:
+            result = notion_agent_config.publish_agent("workflow-1", "space-1", "token", "user-1")
 
         self.assertEqual(result["warning"], "incomplete_ancestor_path")
-        self.assertEqual(result["archivedThreadCount"], 1)
-        self.assertEqual(result["archivedThreadIds"], ["thread-1"])
+        # Archive must NOT run when publish failed
+        cleanup_mock.assert_not_called()
+        self.assertNotIn("archivedThreadCount", result)
 
     def test_publish_agent_reports_cleanup_failure(self) -> None:
         with mock.patch.object(
-            notion_client,
+            notion_agent_config,
             "_post",
             return_value={"workflowArtifactId": "artifact-1", "version": 7},
         ), mock.patch.object(
-            notion_client,
+            notion_agent_config.notion_threads,
             "archive_workflow_threads",
             side_effect=RuntimeError("cleanup failed"),
         ):
-            result = notion_client.publish_agent("workflow-1", "space-1", "token", "user-1")
+            result = notion_agent_config.publish_agent("workflow-1", "space-1", "token", "user-1")
 
         self.assertEqual(result["workflowArtifactId"], "artifact-1")
         self.assertEqual(result["threadCleanupWarning"], "cleanup failed")

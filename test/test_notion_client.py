@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT / "cli"))
 
 import notion_client  # noqa: E402
 import notion_agent_config  # noqa: E402
+import notion_threads  # noqa: E402
 
 
 class NotionClientTests(unittest.TestCase):
@@ -67,7 +68,7 @@ class NotionClientTests(unittest.TestCase):
         }
 
         with mock.patch.object(
-            notion_client,
+            notion_threads,
             "_post",
             side_effect=[first_page, second_page],
         ) as post_mock:
@@ -114,7 +115,7 @@ class NotionClientTests(unittest.TestCase):
         )
 
     def test_archive_threads_uses_delete_chat_transaction_shape(self) -> None:
-        with mock.patch.object(notion_client, "_post", return_value={}) as post_mock:
+        with mock.patch.object(notion_threads, "_post", return_value={}) as post_mock:
             archived = notion_client.archive_threads(
                 ["thread-1", "thread-2", "thread-1"],
                 "space-1",

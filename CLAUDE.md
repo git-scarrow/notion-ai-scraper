@@ -16,6 +16,7 @@ The project uses a centralized configuration pattern in `cli/config.py`. All har
 - `WORK_ITEMS_DB_ID`: The Work Items database UUID.
 - `LAB_PROJECTS_DB_ID`: The Lab Projects database UUID.
 - `AUDIT_LOG_DB_ID`: The Lab Audit Log database UUID.
+- `EVIDENCE_DOSSIER_DB_ID`: The Evidence Dossier database UUID (Writing Workshop).
 
 ### Tool-Specific Configuration
 - `LIBRARIAN_WORKFLOW_ID`: The Agent workflow ID for the Lab Librarian.
@@ -86,4 +87,5 @@ Notion databases have two distinct UUIDs. Using the wrong one will result in a 4
 | `cli/dispatch.py` | Dispatch adapter (v1.1 contract) |
 | `cli/contracts/` | JSON schemas + configs for dispatch contract |
 | `cli/test_dispatch.py` | Dispatch adapter unit tests |
+| `cli/agent_instructions/evidence_verifier.md` | Evidence Verifier agent instructions (source of truth) |
 | `.mcp.json` | MCP server registration |

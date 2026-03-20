@@ -19,6 +19,13 @@ import dispatch
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _clear_lab_control_cache():
+    """Keep gate checks deterministic across tests."""
+    dispatch._lab_control_cache.clear()
+    yield
+    dispatch._lab_control_cache.clear()
+
 def _make_props(
     name: str = "TEST-GAUNTLET-1",
     objective: str = "Test objective",
@@ -83,6 +90,7 @@ def _mock_client(props: dict, work_item_id: str | None = None) -> MagicMock:
     client = MagicMock()
     wid = work_item_id or str(uuid.uuid4())
     client.retrieve_page.return_value = {"id": wid, "properties": props}
+    client.query_all.return_value = []
     return client
 
 

@@ -114,6 +114,21 @@ def test_lane_capabilities_structure():
         assert isinstance(caps["max_timeout_s"], int), f"{lane} max_timeout_s not int"
 
 
+def test_apply_redaction_tolerates_missing_replacement_template(monkeypatch):
+    monkeypatch.setattr(
+        dispatch,
+        "REDACTION_CONFIG",
+        {
+            "patterns": [
+                {"label": "API key", "regex": r"sk-[A-Za-z0-9]{20,}"},
+            ]
+        },
+    )
+    redacted = dispatch._apply_redaction("Token sk-abcdefghijklmnopqrstuvwxyz1234")
+    assert "[REDACTED:API key]" in redacted
+    assert "sk-" not in redacted
+
+
 # ── Dispatch Via default mapping ─────────────────────────────────────────────
 
 def test_dispatch_via_defaults():

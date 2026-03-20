@@ -507,9 +507,17 @@ def _check_return_idempotency(
 def _apply_redaction(text: str) -> str:
     """Apply redaction patterns from shared contract config."""
     import re
+    template = REDACTION_CONFIG.get("replacement", "[REDACTED:{label}]")
     for pattern_def in REDACTION_CONFIG.get("patterns", []):
-        compiled = re.compile(pattern_def["regex"])
-        replacement = REDACTION_CONFIG["replacement"].replace("{label}", pattern_def["label"])
+        regex = pattern_def.get("regex")
+        if not regex:
+            continue
+        try:
+            compiled = re.compile(regex)
+        except re.error:
+            continue
+        label = pattern_def.get("label", "secret")
+        replacement = template.replace("{label}", label)
         text = compiled.sub(replacement, text)
     return text
 

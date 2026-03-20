@@ -1,5 +1,8 @@
+import copy
+import difflib
 import time
 import uuid
+import base64
 from typing import Any
 
 from notion_http import _post, _normalize_record_map, _tx, _block_pointer, send_ops
@@ -48,11 +51,16 @@ def resolve_render_root_id(requested_root_id: str, blocks: dict) -> str:
     diff purposes we want the source content, not the wrapper shell or copied
     child graph.
     """
-    root = (blocks.get(requested_root_id) or {}).get("value", {})
-    source_id = _copied_from_block_id(root)
-    if source_id:
-        return source_id
-    return requested_root_id
+    current_id = requested_root_id
+    seen: set[str] = set()
+    while current_id and current_id not in seen:
+        seen.add(current_id)
+        root = (blocks.get(current_id) or {}).get("value", {})
+        source_id = _copied_from_block_id(root)
+        if not source_id:
+            return current_id
+        current_id = source_id
+    return current_id or requested_root_id
 
 def get_block_children(notion_public_id: str, space_id: str,
                        token_v2: str, user_id: str | None = None) -> list[str]:
@@ -182,6 +190,7 @@ def _ops_delete_block(notion_public_id: str, parent_id: str, space_id: str) -> l
 def _ops_insert_block(block: dict, parent_id: str, after_id: str | None,
                       space_id: str) -> tuple[list[dict], str]:
     """Return (ops, new_notion_public_id) to insert a block. Handles children recursively."""
+    block = copy.deepcopy(block)
     children = block.pop("children", None)
     notion_public_id = str(uuid.uuid4())
     now = int(time.time() * 1000)
@@ -230,12 +239,18 @@ def _ops_insert_block(block: dict, parent_id: str, after_id: str | None,
 
 def _ops_update_block(notion_public_id: str, space_id: str,
                       properties: dict, format_: dict | None = None) -> list[dict]:
-    """Return ops to update a block's properties (and optionally format) in place."""
+    """Return merge-style ops to update a block in place.
+
+    Use `update` rather than `set` for nested `properties` / `format` payloads.
+    The live Notion editor and older in-product agent edit paths both avoid
+    whole-dict replacement for block text edits; they mutate specific fields
+    while preserving surrounding CRDT / property structure.
+    """
     ops = [
         {
             "pointer": _block_pointer(notion_public_id, space_id),
             "path": ["properties"],
-            "command": "set",
+            "command": "update",
             "args": properties,
         },
     ]
@@ -243,9 +258,193 @@ def _ops_update_block(notion_public_id: str, space_id: str,
         ops.append({
             "pointer": _block_pointer(notion_public_id, space_id),
             "path": ["format"],
-            "command": "set",
+            "command": "update",
             "args": format_,
         })
+    return ops
+
+
+def _new_text_item_id() -> list[Any]:
+    """Generate a Notion-style CRDT text item ID."""
+    raw = base64.urlsafe_b64encode(uuid.uuid4().bytes).decode().rstrip("=")
+    return [raw[:12], 1]
+
+
+def _extract_crdt_title_state(block: dict) -> dict[str, Any] | None:
+    """Extract the minimum CRDT state needed for whole-title replacement.
+
+    We only support the safe case where the root CRDT title graph exposes a
+    visible text span that matches the current rendered plain text exactly.
+    When the title graph is more fragmented or ambiguous, callers should fall
+    back to a merge-style `properties` update.
+    """
+    crdt_title = (block.get("crdt_data") or {}).get("title")
+    if not isinstance(crdt_title, dict):
+        return None
+
+    nodes = crdt_title.get("n") or {}
+    root_key = crdt_title.get("r")
+    root = nodes.get(root_key) or {}
+    root_state = root.get("s") or {}
+    text_instance_id = root_state.get("x")
+    if not isinstance(text_instance_id, str) or not text_instance_id:
+        return None
+
+    current_text = _title_text(block)
+    if not current_text:
+        return {
+            "text_instance_id": text_instance_id,
+            "plain_text": "",
+            "start_id": None,
+            "length": 0,
+        }
+
+    items = root_state.get("i") or []
+    if not isinstance(items, list):
+        return None
+
+    visible_nodes = [
+        item for item in items
+        if isinstance(item, dict)
+        and item.get("t") == "t"
+        and isinstance(item.get("i"), list)
+        and isinstance(item.get("c"), str)
+        and isinstance(item.get("l"), int)
+        and item.get("l", 0) > 0
+    ]
+    if not visible_nodes:
+        return None
+
+    reconstructed = "".join(item.get("c", "") for item in visible_nodes)
+    if reconstructed != current_text:
+        return None
+
+    runs: list[dict[str, Any]] = []
+    cursor = 0
+    for item in visible_nodes:
+        start_id = item.get("i")
+        if not isinstance(start_id, list) or len(start_id) != 2:
+            return None
+        content = item.get("c", "")
+        length = item.get("l", 0)
+        runs.append({
+            "start_id": start_id,
+            "content": content,
+            "length": length,
+            "start_offset": cursor,
+            "end_offset": cursor + length,
+        })
+        cursor += length
+
+    start_id = runs[0]["start_id"]
+    if not isinstance(start_id, list) or len(start_id) != 2:
+        return None
+
+    return {
+        "text_instance_id": text_instance_id,
+        "plain_text": current_text,
+        "start_id": start_id,
+        "length": len(current_text),
+        "runs": runs,
+    }
+
+
+def _ops_touch_block(notion_public_id: str, space_id: str,
+                     user_id: str | None = None,
+                     now_ms: int | None = None) -> list[dict]:
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    args: dict[str, Any] = {"last_edited_time": now_ms}
+    if user_id:
+        args["last_edited_by_id"] = user_id
+        args["last_edited_by_table"] = "notion_user"
+    return [{
+        "pointer": _block_pointer(notion_public_id, space_id),
+        "path": [],
+        "command": "update",
+        "args": args,
+    }]
+
+
+def _ops_replace_title_text_via_crdt(
+    notion_public_id: str,
+    space_id: str,
+    old_block: dict,
+    new_text: str,
+) -> list[dict]:
+    """Emit UI-like CRDT text ops for a title patch when safe."""
+    state = _extract_crdt_title_state(old_block)
+    if state is None:
+        return []
+
+    text_instance_id = state["text_instance_id"]
+    old_text = state["plain_text"]
+    runs = state["runs"]
+
+    def _item_id_at_offset(offset: int) -> list[Any] | None:
+        for run in runs:
+            if run["start_offset"] <= offset < run["end_offset"]:
+                base = run["start_id"]
+                if not isinstance(base, list) or len(base) != 2 or not isinstance(base[1], int):
+                    return None
+                delta = offset - run["start_offset"]
+                return [base[0], base[1] + delta]
+        return None
+
+    def _origin_id_before_offset(offset: int) -> str | list[Any] | None:
+        if offset <= 0:
+            return "start"
+        return _item_id_at_offset(offset - 1)
+
+    prefix = 0
+    max_prefix = min(len(old_text), len(new_text))
+    while prefix < max_prefix and old_text[prefix] == new_text[prefix]:
+        prefix += 1
+
+    suffix = 0
+    max_suffix = min(len(old_text) - prefix, len(new_text) - prefix)
+    while suffix < max_suffix and old_text[len(old_text) - 1 - suffix] == new_text[len(new_text) - 1 - suffix]:
+        suffix += 1
+
+    delete_len = len(old_text) - prefix - suffix
+    insert_text = new_text[prefix: len(new_text) - suffix if suffix else len(new_text)]
+
+    ops: list[dict] = []
+    if delete_len:
+        start_id = _item_id_at_offset(prefix)
+        if start_id is None:
+            return []
+        ops.append({
+            "command": "deleteText",
+            "pointer": _block_pointer(notion_public_id, space_id),
+            "path": [],
+            "opVersion": 2,
+            "args": {
+                "type": "deleteText",
+                "textInstanceId": text_instance_id,
+                "searchLabel": "",
+                "idRanges": [[start_id, delete_len]],
+            },
+        })
+
+    if insert_text:
+        origin_id = _origin_id_before_offset(prefix)
+        if origin_id is None:
+            return []
+        ops.append({
+            "command": "insertText",
+            "pointer": _block_pointer(notion_public_id, space_id),
+            "path": [],
+            "opVersion": 2,
+            "args": {
+                "type": "insertText",
+                "textInstanceId": text_instance_id,
+                "searchLabel": "",
+                "id": _new_text_item_id(),
+                "originId": origin_id,
+                "content": insert_text,
+            },
+        })
+
     return ops
 
 
@@ -330,6 +529,175 @@ def _collect_delete_tree_ops(notion_public_id: str, parent_id: str, space_id: st
     return ops
 
 
+def _diff_block_children(
+    parent_id: str,
+    existing_ids: list[str],
+    new_blocks: list[dict],
+    blocks_map: dict,
+    space_id: str,
+    user_id: str | None,
+) -> tuple[list[dict], dict[str, int]]:
+    """Diff a parent's children while preserving existing block IDs when possible."""
+    existing_fps: list[tuple[str, tuple]] = []
+    for bid in existing_ids:
+        bdata = blocks_map.get(bid, {}).get("value", {})
+        if not bdata or not bdata.get("alive", True):
+            continue
+        existing_fps.append((bid, _api_block_fingerprint(bdata, blocks_map)))
+
+    new_fps = [_block_fingerprint(b) for b in new_blocks]
+    ops, stats, _ = _diff_block_children_zone(
+        parent_id,
+        existing_fps,
+        new_blocks,
+        new_fps,
+        blocks_map,
+        space_id,
+        user_id,
+        None,
+    )
+    return ops, stats
+
+
+def _diff_block_children_zone(
+    parent_id: str,
+    existing_zone: list[tuple[str, tuple]],
+    new_blocks: list[dict],
+    new_fps: list[tuple],
+    blocks_map: dict,
+    space_id: str,
+    user_id: str | None,
+    after_id: str | None,
+) -> tuple[list[dict], dict[str, int], str | None]:
+    """Diff one sibling zone using exact-match alignment before fallback updates."""
+    stats = {
+        "unchanged": 0,
+        "deleted": 0,
+        "inserted": 0,
+        "updated": 0,
+    }
+    ops: list[dict] = []
+    matcher = difflib.SequenceMatcher(
+        a=[fp for _, fp in existing_zone],
+        b=new_fps,
+        autojunk=False,
+    )
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            stats["unchanged"] += (i2 - i1)
+            if i2 > i1:
+                after_id = existing_zone[i2 - 1][0]
+            continue
+
+        zone_ops, zone_stats, after_id = _diff_block_children_replace_zone(
+            parent_id,
+            existing_zone[i1:i2],
+            new_blocks[j1:j2],
+            new_fps[j1:j2],
+            blocks_map,
+            space_id,
+            user_id,
+            after_id,
+        )
+        ops.extend(zone_ops)
+        for key, value in zone_stats.items():
+            stats[key] += value
+
+    return ops, stats, after_id
+
+
+def _diff_block_children_replace_zone(
+    parent_id: str,
+    existing_zone: list[tuple[str, tuple]],
+    new_blocks: list[dict],
+    new_fps: list[tuple],
+    blocks_map: dict,
+    space_id: str,
+    user_id: str | None,
+    after_id: str | None,
+) -> tuple[list[dict], dict[str, int], str | None]:
+    """Handle a mixed replace zone with a conservative identity-preserving fallback."""
+    stats = {
+        "unchanged": 0,
+        "deleted": 0,
+        "inserted": 0,
+        "updated": 0,
+    }
+    ops: list[dict] = []
+    i_old = 0
+    i_new = 0
+
+    while i_old < len(existing_zone) and i_new < len(new_blocks):
+        old_bid, old_fp = existing_zone[i_old]
+        new_fp = new_fps[i_new]
+        new_block = new_blocks[i_new]
+
+        if old_fp == new_fp:
+            stats["unchanged"] += 1
+            after_id = old_bid
+            i_old += 1
+            i_new += 1
+            continue
+
+        old_block = blocks_map.get(old_bid, {}).get("value", {})
+        if old_fp[0] == new_fp[0]:
+            new_props = new_block.get("properties", {})
+            new_fmt = new_block.get("format")
+            old_plain = _title_text(old_block)
+            new_plain = _title_text(new_block)
+            if old_plain != new_plain:
+                ops.extend(_ops_replace_title_text_via_crdt(old_bid, space_id, old_block, new_plain))
+            ops.extend(_ops_update_block(old_bid, space_id, new_props, new_fmt))
+            ops.extend(_ops_touch_block(old_bid, space_id, user_id))
+
+            child_ops, child_stats = _diff_block_children(
+                old_bid,
+                old_block.get("content", []),
+                new_block.get("children") or [],
+                blocks_map,
+                space_id,
+                user_id,
+            )
+            ops.extend(child_ops)
+            for key, value in child_stats.items():
+                stats[key] += value
+
+            stats["updated"] += 1
+            after_id = old_bid
+            i_old += 1
+            i_new += 1
+            continue
+
+        remaining_old_types = [fp[0] for _, fp in existing_zone[i_old + 1:]]
+        if new_fp[0] in remaining_old_types:
+            ops.extend(_collect_delete_tree_ops(old_bid, parent_id, space_id, blocks_map))
+            stats["deleted"] += 1
+            i_old += 1
+            continue
+
+        insert_ops, new_id = _ops_insert_block(new_block, parent_id, after_id, space_id)
+        ops.extend(insert_ops)
+        stats["inserted"] += 1
+        after_id = new_id
+        i_new += 1
+
+    while i_old < len(existing_zone):
+        old_bid, _ = existing_zone[i_old]
+        ops.extend(_collect_delete_tree_ops(old_bid, parent_id, space_id, blocks_map))
+        stats["deleted"] += 1
+        i_old += 1
+
+    while i_new < len(new_blocks):
+        insert_ops, new_id = _ops_insert_block(new_blocks[i_new], parent_id, after_id, space_id)
+        ops.extend(insert_ops)
+        stats["inserted"] += 1
+        after_id = new_id
+        i_new += 1
+
+    return ops, stats, after_id
+
+
 def diff_replace_block_content(
     parent_id: str, space_id: str,
     new_blocks: list[dict],
@@ -341,141 +709,44 @@ def diff_replace_block_content(
     blocks_map = tree.get("recordMap", {}).get("block", {})
 
     parent_block = blocks_map.get(parent_id, {}).get("value", {})
-    existing_ids = parent_block.get("content", [])
+    ops, stats = _diff_block_children(
+        parent_id,
+        parent_block.get("content", []),
+        new_blocks,
+        blocks_map,
+        space_id,
+        user_id,
+    )
 
-    existing_fps = []
-    for bid in existing_ids:
-        bdata = blocks_map.get(bid, {}).get("value", {})
-        if not bdata or not bdata.get("alive", True):
-            continue
-        existing_fps.append((bid, _api_block_fingerprint(bdata, blocks_map)))
-
-    new_fps = [_block_fingerprint(b) for b in new_blocks]
-
-    prefix_len = 0
-    for i in range(min(len(existing_fps), len(new_fps))):
-        if existing_fps[i][1] == new_fps[i]:
-            prefix_len = i + 1
-        else:
-            break
-
-    suffix_len = 0
-    max_suffix = min(len(existing_fps) - prefix_len, len(new_fps) - prefix_len)
-    for i in range(1, max_suffix + 1):
-        if existing_fps[-i][1] == new_fps[-i]:
-            suffix_len = i
-        else:
-            break
-
-    old_start = prefix_len
-    old_end = len(existing_fps) - suffix_len
-    new_start = prefix_len
-    new_end = len(new_fps) - suffix_len
-
-    n_unchanged = prefix_len + suffix_len
-    n_deleted = 0
-    n_inserted = 0
-    n_updated = 0
-
-    if old_start >= old_end and new_start >= new_end:
+    if not ops:
+        existing_count = len([
+            bid for bid in parent_block.get("content", [])
+            if blocks_map.get(bid, {}).get("value", {}).get("alive", True)
+        ])
         return {
-            "unchanged": n_unchanged, "deleted": 0, "inserted": 0,
-            "updated": 0, "ops": 0, "api_calls_saved": len(existing_fps),
+            "unchanged": stats["unchanged"],
+            "deleted": 0,
+            "inserted": 0,
+            "updated": 0,
+            "ops": 0,
+            "api_calls_saved": existing_count,
         }
 
-    ops: list[dict] = []
-
-    old_zone = existing_fps[old_start:old_end]
-    new_zone = new_blocks[new_start:new_end]
-
-    i_old, i_new = 0, 0
-    consumed_old: set[int] = set()
-
-    while i_old < len(old_zone) and i_new < len(new_zone):
-        old_bid, old_fp = old_zone[i_old]
-        new_fp = new_fps[new_start + i_new]
-        new_block = new_zone[i_new]
-
-        if old_fp == new_fp:
-            n_unchanged += 1
-            consumed_old.add(i_old)
-            i_old += 1
-            i_new += 1
-        elif old_fp[0] == new_fp[0]:
-            new_props = new_block.get("properties", {})
-            new_fmt = new_block.get("format")
-            ops.extend(_ops_update_block(old_bid, space_id, new_props, new_fmt))
-
-            new_children = new_block.get("children")
-            old_block = blocks_map.get(old_bid, {}).get("value", {})
-            old_child_ids = old_block.get("content", [])
-
-            if new_children or old_child_ids:
-                for cid in old_child_ids:
-                    ops.extend(_collect_delete_tree_ops(cid, old_bid, space_id, blocks_map))
-                if new_children:
-                    child_after = None
-                    for child_block in new_children:
-                        child_ops, child_id = _ops_insert_block(
-                            child_block, old_bid, child_after, space_id,
-                        )
-                        ops.extend(child_ops)
-                        child_after = child_id
-
-            n_updated += 1
-            consumed_old.add(i_old)
-            i_old += 1
-            i_new += 1
-        else:
-            ops.extend(_collect_delete_tree_ops(old_bid, parent_id, space_id, blocks_map))
-            consumed_old.add(i_old)
-            n_deleted += 1
-            i_old += 1
-
-    while i_old < len(old_zone):
-        old_bid, _ = old_zone[i_old]
-        if i_old not in consumed_old:
-            ops.extend(_collect_delete_tree_ops(old_bid, parent_id, space_id, blocks_map))
-            n_deleted += 1
-        i_old += 1
-
-    if i_new < len(new_zone):
-        if consumed_old:
-            max_consumed = max(consumed_old)
-            after_id = old_zone[max_consumed][0]
-            while max_consumed in consumed_old and max_consumed >= 0:
-                old_bid_check = old_zone[max_consumed][0]
-                was_deleted = any(
-                    op.get("args", {}).get("alive") is False
-                    and op.get("pointer", {}).get("id") == old_bid_check
-                    for op in ops
-                )
-                if not was_deleted:
-                    after_id = old_bid_check
-                    break
-                max_consumed -= 1
-            else:
-                after_id = existing_fps[prefix_len - 1][0] if prefix_len > 0 else None
-        else:
-            after_id = existing_fps[prefix_len - 1][0] if prefix_len > 0 else None
-
-        while i_new < len(new_zone):
-            insert_ops, new_id = _ops_insert_block(
-                new_zone[i_new], parent_id, after_id, space_id,
-            )
-            ops.extend(insert_ops)
-            after_id = new_id
-            n_inserted += 1
-            i_new += 1
+    touched_parent = any(
+        op.get("pointer", {}).get("id") != parent_id
+        for op in ops
+    )
+    if touched_parent:
+        ops.extend(_ops_touch_block(parent_id, space_id, user_id))
 
     send_ops(space_id, ops, token_v2, user_id, dry_run)
-    old_approach_calls = len(existing_ids) + len(new_blocks)
+    old_approach_calls = len(parent_block.get("content", [])) + len(new_blocks)
 
     return {
-        "unchanged": n_unchanged,
-        "deleted": n_deleted,
-        "inserted": n_inserted,
-        "updated": n_updated,
+        "unchanged": stats["unchanged"],
+        "deleted": stats["deleted"],
+        "inserted": stats["inserted"],
+        "updated": stats["updated"],
         "ops": len(ops),
         "api_calls_saved": max(0, old_approach_calls - 1),
     }

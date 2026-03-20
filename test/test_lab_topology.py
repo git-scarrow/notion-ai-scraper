@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "cli"))
@@ -227,6 +229,86 @@ def test_normalize_trigger_resolves_property_names():
     assert normalized["database_key"] == "work_items"
     assert normalized["properties"][0]["name"] == "Dispatch Requested Received At"
     assert normalized["conditions"][0]["property_name"] == "Dispatch Requested Received At"
+
+
+def test_render_block_markdown_follows_multi_hop_copied_chain():
+    published_tree = {
+        "recordMap": {
+            "block": {
+                "published": {
+                    "value": {
+                        "id": "published",
+                        "type": "page",
+                        "format": {"copied_from_pointer": {"id": "draft"}},
+                    }
+                }
+            }
+        }
+    }
+    draft_tree = {
+        "recordMap": {
+            "block": {
+                "draft": {
+                    "value": {
+                        "id": "draft",
+                        "type": "page",
+                        "format": {"copied_from_pointer": {"id": "source"}},
+                    }
+                }
+            }
+        }
+    }
+    source_tree = {
+        "recordMap": {
+            "block": {
+                "source": {
+                    "value": {
+                        "id": "source",
+                        "type": "page",
+                    }
+                }
+            }
+        }
+    }
+
+    with mock.patch.object(
+        lab_topology.notion_blocks,
+        "get_block_tree",
+        side_effect=[published_tree, draft_tree, source_tree],
+    ), mock.patch.object(
+        lab_topology.block_builder,
+        "blocks_to_markdown",
+        side_effect=lambda blocks_map, root_id: f"root={root_id}",
+    ):
+        rendered = lab_topology._render_block_markdown("published", "space-1", "token", "user-1")
+
+    assert rendered == "root=source"
+
+
+def test_fetch_recent_work_items_uses_explicit_database_id_when_config_is_empty():
+    recent_page = {
+        "id": "page-1",
+        "created_time": "2026-03-20T00:00:00Z",
+        "last_edited_time": "2026-03-20T00:00:00Z",
+        "properties": {},
+    }
+    fake_client = mock.Mock()
+    fake_client.query_all.return_value = [recent_page]
+
+    with mock.patch.object(
+        lab_topology,
+        "get_config",
+        return_value=SimpleNamespace(notion_token="token", work_items_db_id=""),
+    ), mock.patch.object(
+        lab_topology.notion_api,
+        "NotionAPIClient",
+        return_value=fake_client,
+    ):
+        pages, error = lab_topology.fetch_recent_work_items(database_id="daeb64d4-e5a8-4a7b-b0dc-7555cbc3def6")
+
+    assert error is None
+    assert pages == [recent_page]
+    fake_client.query_all.assert_called_once_with("daeb64d4-e5a8-4a7b-b0dc-7555cbc3def6")
 
 
 def test_evaluate_drift_flags_missing_published_artifact():

@@ -1031,7 +1031,10 @@ def audit_lab_topology() -> str:
     """
     token, user_id = _get_auth()
     snapshot = lab_topology.compile_snapshot(token, user_id)
-    recent_items, recent_error = lab_topology.fetch_recent_work_items()
+    work_items_db = snapshot["indexes"]["database_by_key"].get("work_items", {})
+    recent_items, recent_error = lab_topology.fetch_recent_work_items(
+        database_id=work_items_db.get("notion_public_id")
+    )
     report = lab_topology.evaluate_drift(
         snapshot,
         recent_work_items=recent_items,

@@ -197,30 +197,47 @@ def get_agent_modules(notion_internal_id: str, token_v2: str,
     }
 
 
+# userAction strings for workflow settings writes.
+# CAPTURE REQUIRED — verify both strings by inspecting a live saveTransactionsMain
+# request in DevTools when changing model or toggling a module on the agent settings page.
+# DevTools: Network → filter "saveTransactionsMain" → Request Payload → transactions[0].debug.userAction
+# Update these constants once confirmed; the endpoint routing is already correct.
+_UA_SET_MODULES = "agentSettings.updateModules"   # UNVERIFIED — inferred from naming convention
+_UA_SET_MODEL   = "agentSettings.updateModel"     # UNVERIFIED — inferred from naming convention
+
+
 def update_agent_modules(notion_internal_id: str, space_id: str,
                          modules: list, token_v2: str,
                          user_id: str | None = None) -> None:
-    """Write the full modules list to a workflow record."""
+    """Write the full modules list to a workflow record.
+
+    Uses saveTransactionsMain to mirror the UI's settings-page write path.
+    """
     ops = [{
         "pointer": {"table": "workflow", "id": notion_internal_id, "spaceId": space_id},
         "path": ["data", "modules"],
         "command": "set",
         "args": modules,
     }]
-    send_ops(space_id, ops, token_v2, user_id)
+    send_ops(space_id, ops, token_v2, user_id,
+             user_action=_UA_SET_MODULES, endpoint="saveTransactionsMain")
 
 
 def update_agent_model(notion_internal_id: str, space_id: str,
                        model_type: str, token_v2: str,
                        user_id: str | None = None) -> None:
-    """Set the AI model for a workflow."""
+    """Set the AI model for a workflow.
+
+    Uses saveTransactionsMain to mirror the UI's settings-page write path.
+    """
     ops = [{
         "pointer": {"table": "workflow", "id": notion_internal_id, "spaceId": space_id},
         "path": ["data", "model", "type"],
         "command": "set",
         "args": model_type,
     }]
-    send_ops(space_id, ops, token_v2, user_id)
+    send_ops(space_id, ops, token_v2, user_id,
+             user_action=_UA_SET_MODEL, endpoint="saveTransactionsMain")
 
 
 def _get_notion_module(modules: list) -> dict | None:

@@ -218,18 +218,21 @@ def _render_block_markdown(
 ) -> str | None:
     if not block_id or not space_id:
         return None
-    data = notion_blocks.get_block_tree(block_id, space_id, token_v2, user_id)
-    blocks_map = data.get("recordMap", {}).get("block", {})
-    if not blocks_map:
-        return None
-    render_root_id = notion_blocks.resolve_render_root_id(block_id, blocks_map)
-    if render_root_id != block_id and render_root_id not in blocks_map:
-        data = notion_blocks.get_block_tree(render_root_id, space_id, token_v2, user_id)
+    requested_root_id = block_id
+    blocks_map: dict[str, Any] = {}
+    seen: set[str] = set()
+    while requested_root_id and requested_root_id not in seen:
+        seen.add(requested_root_id)
+        data = notion_blocks.get_block_tree(requested_root_id, space_id, token_v2, user_id)
         blocks_map = data.get("recordMap", {}).get("block", {})
         if not blocks_map:
             return None
-    markdown = block_builder.blocks_to_markdown(blocks_map, render_root_id)
-    return _normalize_markdown(markdown or "")
+        render_root_id = notion_blocks.resolve_render_root_id(requested_root_id, blocks_map)
+        if render_root_id == requested_root_id or render_root_id in blocks_map:
+            markdown = block_builder.blocks_to_markdown(blocks_map, render_root_id)
+            return _normalize_markdown(markdown or "")
+        requested_root_id = render_root_id
+    return None
 
 
 def _normalize_permissions_from_modules(
@@ -969,11 +972,16 @@ def _summarize_public_page(page: dict[str, Any]) -> dict[str, Any]:
 def fetch_recent_work_items(
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     limit: int = DEFAULT_LOOKBACK_LIMIT,
+    *,
+    database_id: str | None = None,
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
     try:
         cfg = get_config()
         client = notion_api.NotionAPIClient(cfg.notion_token)
-        pages = client.query_all(cfg.work_items_db_id)
+        work_items_db_id = database_id or cfg.work_items_db_id
+        if not work_items_db_id:
+            raise ValueError("Work Items database ID is not configured")
+        pages = client.query_all(work_items_db_id)
     except Exception as exc:
         return None, str(exc)
 
@@ -1264,7 +1272,10 @@ def main() -> None:
         write_snapshot(args.output, snapshot)
         print(f"\nWrote snapshot to {args.output}")
     if args.audit:
-        recent_items, recent_error = fetch_recent_work_items()
+        work_items_db = snapshot["indexes"]["database_by_key"].get("work_items", {})
+        recent_items, recent_error = fetch_recent_work_items(
+            database_id=work_items_db.get("notion_public_id")
+        )
         report = evaluate_drift(snapshot, recent_items, recent_error=recent_error)
         print("")
         print(render_drift_report(report))

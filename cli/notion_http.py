@@ -131,11 +131,19 @@ def _block_pointer(notion_public_id: str, space_id: str) -> dict:
 def send_ops(space_id: str, ops: list[dict],
              token_v2: str, user_id: str | None = None,
              dry_run: bool = False,
-             user_action: str = "cli.update_agent") -> None:
-    """Send a batch of operations in a single transaction."""
+             user_action: str = "cli.update_agent",
+             endpoint: str = "saveTransactionsFanout") -> None:
+    """Send a batch of operations in a single transaction.
+
+    endpoint:
+        "saveTransactionsFanout" — distributed write, used for block/content edits.
+        "saveTransactionsMain"   — primary-store write, used by the UI for workflow
+                                   settings-page edits (model, modules, permissions).
+                                   Mirror UI behaviour for any workflow record mutations.
+    """
     if not ops:
         return
-    _post("saveTransactionsFanout", _tx(space_id, ops, user_action=user_action), 
+    _post(endpoint, _tx(space_id, ops, user_action=user_action),
           token_v2, user_id, dry_run, space_id=space_id)
 
 

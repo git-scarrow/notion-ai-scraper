@@ -84,6 +84,28 @@ def _post(endpoint: str, payload: dict, token_v2: str, user_id: str | None = Non
     raise RuntimeError(f"Failed after {MAX_RETRIES} attempts: {last_err}")
 
 
+def _post_fire_and_forget(endpoint: str, payload: dict, token_v2: str,
+                          user_id: str | None = None,
+                          space_id: str | None = None) -> None:
+    """POST to a Notion endpoint and return immediately without reading the response.
+
+    Used for streaming endpoints (e.g. runInferenceTranscript) where the response
+    is NDJSON that blocks until inference completes. We only need to fire the
+    request; the server processes it regardless of whether we consume the stream.
+    """
+    url = f"{BASE_URL}/{endpoint}"
+    body = json.dumps(payload).encode()
+    headers = _make_headers(token_v2, user_id, space_id)
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        # Read a tiny prefix to confirm the server accepted, then close
+        resp.read(64)
+        resp.close()
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        raise RuntimeError(f"Inference trigger failed: {e}") from e
+
+
 def _tx(space_id: str, operations: list[dict], *,
         user_action: str = "cli.update_agent",
         unretryable_error_behavior: str | None = None) -> dict:
@@ -142,3 +164,97 @@ def _normalize_record_map(data: dict) -> dict:
                 if unwrapped:
                     table_records[rid] = {"value": unwrapped}
     return data
+
+
+def _chunked(items: list[str], size: int = 50) -> list[list[str]]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def read_records(
+    table: str,
+    ids: list[str],
+    token_v2: str,
+    user_id: str | None = None,
+    *,
+    space_id: str | None = None,
+) -> dict[str, dict]:
+    """Read records by table/id with the correct transport for each table.
+
+    `workflow_artifact` is space-sharded and requires syncRecordValuesSpaceInitial
+    with a pointer that includes spaceId. Most other tables work with getRecordValues.
+    """
+    records: dict[str, dict] = {}
+    unique_ids = sorted({item for item in ids if item})
+    if not unique_ids:
+        return records
+
+    use_space_pointer = table == "workflow_artifact"
+    if use_space_pointer and not space_id:
+        raise ValueError("space_id is required to read workflow_artifact records")
+
+    for batch in _chunked(unique_ids):
+        missing_ids = list(batch)
+        try:
+            if use_space_pointer:
+                payload = {
+                    "requests": [
+                        {
+                            "pointer": {
+                                "table": table,
+                                "id": item_id,
+                                "spaceId": space_id,
+                            },
+                            "version": -1,
+                        }
+                        for item_id in batch
+                    ]
+                }
+                data = _normalize_record_map(
+                    _post("syncRecordValuesSpaceInitial", payload, token_v2, user_id)
+                )
+                record_map = (data.get("recordMap", {}) or {}).get(table, {})
+                for item_id in batch:
+                    value = (record_map.get(item_id) or {}).get("value")
+                    if isinstance(value, dict):
+                        records[item_id] = value
+                missing_ids = [item_id for item_id in batch if item_id not in records]
+            else:
+                payload = {"requests": [{"id": item_id, "table": table} for item_id in batch]}
+                data = _post("getRecordValues", payload, token_v2, user_id, space_id=space_id)
+                for item_id, result in zip(batch, data.get("results", [])):
+                    value = result.get("value")
+                    if isinstance(value, dict):
+                        records[item_id] = value
+                missing_ids = [item_id for item_id in batch if item_id not in records]
+        except Exception:
+            missing_ids = list(batch)
+
+        for item_id in missing_ids:
+            try:
+                if use_space_pointer:
+                    payload = {
+                        "requests": [
+                            {
+                                "pointer": {
+                                    "table": table,
+                                    "id": item_id,
+                                    "spaceId": space_id,
+                                },
+                                "version": -1,
+                            }
+                        ]
+                    }
+                    data = _normalize_record_map(
+                        _post("syncRecordValuesSpaceInitial", payload, token_v2, user_id)
+                    )
+                    value = (((data.get("recordMap", {}) or {}).get(table, {}).get(item_id) or {}).get("value"))
+                else:
+                    payload = {"requests": [{"id": item_id, "table": table}]}
+                    data = _post("getRecordValues", payload, token_v2, user_id, space_id=space_id)
+                    results = data.get("results", [])
+                    value = results[0].get("value") if results else None
+                if isinstance(value, dict):
+                    records[item_id] = value
+            except Exception:
+                continue
+    return records

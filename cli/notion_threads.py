@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from notion_http import _post, _normalize_record_map, _tx, send_ops, _record_value
+from notion_http import _post, _post_fire_and_forget, _normalize_record_map, _tx, send_ops, _record_value, read_records
 import notion_agent_config
 
 def _extract_rich_text(value) -> str | None:
@@ -71,22 +71,10 @@ def _extract_inference_turn(step: dict) -> dict | None:
 
 def get_thread_conversation(thread_id: str, token_v2: str,
                              user_id: str | None = None) -> dict:
-    thread_resp = _post(
-        "getRecordValues",
-        {"requests": [{"id": thread_id, "table": "thread"}]},
-        token_v2, user_id,
-    )
-    results = thread_resp.get("results", [])
-    if not results:
+    thread_records = read_records("thread", [thread_id], token_v2, user_id)
+    if thread_id not in thread_records:
         raise ValueError(f"Thread '{thread_id}' not found.")
-    rec = results[0]
-    if not rec.get("value"):
-        if rec.get("role"):
-            raise ValueError(
-                f"Thread '{thread_id}' exists but its content has been deleted or purged by Notion."
-            )
-        raise ValueError(f"Thread '{thread_id}' not found or inaccessible.")
-    thread = results[0]["value"]
+    thread = thread_records[thread_id]
 
     message_ids: list[str] = thread.get("messages") or []
     title: str | None = thread.get("data", {}).get("title") or None
@@ -103,21 +91,15 @@ def get_thread_conversation(thread_id: str, token_v2: str,
             "updatedById": thread.get("updated_by_id"),
         }
 
-    msg_resp = _post(
-        "getRecordValues",
-        {"requests": [{"id": mid, "table": "thread_message"} for mid in message_ids]},
-        token_v2, user_id,
-        space_id=space_id,
-    )
+    msg_records = read_records("thread_message", message_ids, token_v2, user_id, space_id=space_id)
 
     turns: list[dict] = []
     orphan_tool_calls: list[dict] = []
 
-    for i, result in enumerate(msg_resp.get("results", [])):
-        msg = result.get("value")
+    for mid in message_ids:
+        msg = msg_records.get(mid)
         if not msg:
             continue
-        mid = message_ids[i]
         step = msg.get("step") or {}
         ts = msg.get("created_time")
         author = msg.get("created_by_id")
@@ -669,7 +651,7 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
                     "model": model,
                     "modelFromUser": False,
                     "isCustomAgent": True,
-                    "isCustomAgentBuilder": True,
+                    "isCustomAgentBuilder": False,
                     "useCustomAgentDraft": True,
                     "use_draft_actor_pointer": False,
                     "enableUpdatePageAutofixer": True,
@@ -706,10 +688,8 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
         ],
     }
     
-    try:
-        _post("runInferenceTranscript", inference_payload, token_v2, user_id)
-    except json.JSONDecodeError:
-        pass
+    _post_fire_and_forget("runInferenceTranscript", inference_payload, token_v2,
+                          user_id, space_id=space_id)
 
     return msg_id
 
@@ -717,7 +697,16 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
 def wait_for_agent_response(thread_id: str, after_msg_id: str,
                              token_v2: str, user_id: str | None = None,
                              timeout: int = 120, poll_interval: int = 3) -> str | None:
+    """Poll until the agent's final response is stable.
+
+    Multi-step agents (think → tool call → answer) emit intermediate assistant
+    turns before the final one. We scan for the LAST assistant turn after the
+    user message and return it only once its content is unchanged across two
+    consecutive polls, indicating inference is complete.
+    """
     deadline = time.time() + timeout
+    last_content: str | None = None
+
     while time.time() < deadline:
         time.sleep(poll_interval)
         try:
@@ -727,7 +716,9 @@ def wait_for_agent_response(thread_id: str, after_msg_id: str,
         turns = conv.get("turns") or conv.get("messages") or []
         if not turns:
             continue
+
         found_user = False
+        current_content: str | None = None
         for turn in turns:
             turn_id = turn.get("msgId") or turn.get("id") or turn.get("messageId")
             if turn_id == after_msg_id:
@@ -738,5 +729,12 @@ def wait_for_agent_response(thread_id: str, after_msg_id: str,
                 if isinstance(content, list):
                     content = "\n".join(str(c) for c in content)
                 if content.strip():
-                    return content.strip()
-    return None
+                    current_content = content.strip()  # keep scanning — we want the last one
+
+        if current_content is not None:
+            if current_content == last_content:
+                # Stable across two consecutive polls — inference complete
+                return current_content
+            last_content = current_content
+
+    return last_content  # return whatever we have at timeout

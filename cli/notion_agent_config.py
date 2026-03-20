@@ -2,7 +2,7 @@ import re
 import time
 import uuid
 from typing import Any
-from notion_http import _post, _normalize_record_map, _tx, send_ops
+from notion_http import _post, _normalize_record_map, _tx, send_ops, read_records
 
 import notion_threads
 
@@ -66,17 +66,12 @@ def get_all_workspace_agents(space_id: str, token_v2: str,
 
     notion_internal_ids = list(seen.keys())
 
-    batch_payload = {
-        "requests": [{"id": wid, "table": "workflow"} for wid in notion_internal_ids],
-    }
-    wf_data = _post("getRecordValues", batch_payload, token_v2, user_id)
-
     agents = []
-    for i, result in enumerate(wf_data.get("results", [])):
-        wf = result.get("value")
+    workflow_records = read_records("workflow", notion_internal_ids, token_v2, user_id, space_id=space_id)
+    for wf_id in notion_internal_ids:
+        wf = workflow_records.get(wf_id)
         if not wf:
             continue
-        wf_id = notion_internal_ids[i]
         data = wf.get("data", {})
         name = data.get("name") or seen[wf_id]["name"]
         instructions = data.get("instructions")
@@ -96,25 +91,24 @@ def get_all_workspace_agents(space_id: str, token_v2: str,
 
 def get_workflow_record(notion_internal_id: str, token_v2: str,
                         user_id: str | None = None) -> dict:
-    payload = {
-        "requests": [{"id": notion_internal_id, "table": "workflow"}],
-    }
-    data = _post("getRecordValues", payload, token_v2, user_id)
-    results = data.get("results", [])
-    if not results or not results[0].get("value"):
+    records = read_records("workflow", [notion_internal_id], token_v2, user_id)
+    if notion_internal_id not in records:
         raise RuntimeError(
             f"Workflow {notion_internal_id} not found or inaccessible. "
-            f"Response: {data}"
+            f"Response: {{'table': 'workflow', 'id': '{notion_internal_id}'}}"
         )
-    return results[0]["value"]
+    return records[notion_internal_id]
 
 
 MODEL_NAMES = {
     "avocado-froyo-medium": "Opus 4.6",
     "almond-croissant-low": "Sonnet 4.6",
-    "oatmeal-cookie": "ChatGPT (o-series)",
-    "oval-kumquat-medium": "ChatGPT 5.4",
-    "fireworks-minimax-m2.5": "Minimax M2.5",
+    "anthropic-haiku-4.5": "Haiku 4.5",
+    "oatmeal-cookie": "GPT-5.2",
+    "oval-kumquat-medium": "GPT-5.4",
+    "otaheite-apple-medium": "GPT-5.4 mini/nano",
+    "gingerbread": "Gemini 3 Flash",
+    "fireworks-minimax-m2.5": "MiniMax M2.5",
     "auto": "Auto",
     "unknown": "Auto (default)",
 }
@@ -124,34 +118,27 @@ def _resolve_page_names(notion_public_ids: list[str], token_v2: str,
                         user_id: str | None = None) -> dict[str, str]:
     if not notion_public_ids:
         return {}
-    payload = {
-        "requests": [{"id": bid, "table": "block"} for bid in notion_public_ids],
-    }
-    data = _post("getRecordValues", payload, token_v2, user_id)
     names = {}
     coll_ids_to_resolve: dict[str, str] = {}
-
-    for i, result in enumerate(data.get("results", [])):
-        val = result.get("value", {})
+    block_records = read_records("block", notion_public_ids, token_v2, user_id)
+    for bid in notion_public_ids:
+        val = block_records.get(bid, {})
         title_prop = val.get("properties", {}).get("title", [])
         if title_prop:
-            names[notion_public_ids[i]] = "".join(c[0] for c in title_prop if c)
+            names[bid] = "".join(c[0] for c in title_prop if c)
         else:
             coll_id = val.get("collection_id")
             if coll_id:
-                coll_ids_to_resolve[coll_id] = notion_public_ids[i]
+                coll_ids_to_resolve[coll_id] = bid
             else:
-                names[notion_public_ids[i]] = notion_public_ids[i]
+                names[bid] = bid
 
     if coll_ids_to_resolve:
-        coll_payload = {
-            "requests": [{"id": cid, "table": "collection"} for cid in coll_ids_to_resolve],
-        }
-        coll_data = _post("getRecordValues", coll_payload, token_v2, user_id)
-        for i, result in enumerate(coll_data.get("results", [])):
-            cid = list(coll_ids_to_resolve.keys())[i]
+        collection_ids = list(coll_ids_to_resolve.keys())
+        coll_records = read_records("collection", collection_ids, token_v2, user_id)
+        for cid in collection_ids:
             bid = coll_ids_to_resolve[cid]
-            coll_val = result.get("value", {})
+            coll_val = coll_records.get(cid, {})
             coll_name = coll_val.get("name", [[""]])[0][0] if coll_val.get("name") else cid
             names[bid] = coll_name
 

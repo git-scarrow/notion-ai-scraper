@@ -4,6 +4,56 @@ from typing import Any
 
 from notion_http import _post, _normalize_record_map, _tx, _block_pointer, send_ops
 
+
+def _copied_from_block_id(block: dict) -> str | None:
+    return (((block.get("format") or {}).get("copied_from_pointer") or {}).get("id"))
+
+
+def _is_copied_shell_page(root_id: str, blocks: dict) -> bool:
+    root = (blocks.get(root_id) or {}).get("value", {})
+    if root.get("type") != "page":
+        return False
+    if not _copied_from_block_id(root):
+        return False
+
+    child_ids = root.get("content", []) or []
+    if len(child_ids) != 1 or len(blocks) != 2:
+        return False
+
+    child = (blocks.get(child_ids[0]) or {}).get("value", {})
+    if not child.get("alive", True):
+        return False
+    if child.get("content"):
+        return False
+    if child.get("properties"):
+        return False
+    return bool(_copied_from_block_id(child))
+
+
+def _alias_root_id(tree: dict, requested_root_id: str, source_root_id: str) -> dict:
+    record_map = tree.setdefault("recordMap", {})
+    blocks = record_map.setdefault("block", {})
+    source_entry = blocks.get(source_root_id)
+    if not source_entry:
+        return tree
+    blocks[requested_root_id] = source_entry
+    return tree
+
+
+def resolve_render_root_id(requested_root_id: str, blocks: dict) -> str:
+    """Return the root block ID whose content should be rendered.
+
+    Published instruction pages are often copy wrappers that point back to the
+    editable source page via format.copied_from_pointer. For semantic render and
+    diff purposes we want the source content, not the wrapper shell or copied
+    child graph.
+    """
+    root = (blocks.get(requested_root_id) or {}).get("value", {})
+    source_id = _copied_from_block_id(root)
+    if source_id:
+        return source_id
+    return requested_root_id
+
 def get_block_children(notion_public_id: str, space_id: str,
                        token_v2: str, user_id: str | None = None) -> list[str]:
     """Return ordered list of child block IDs for a given block."""
@@ -53,6 +103,11 @@ def get_block_tree(notion_public_id: str, space_id: str,
         cursor = next_cursor
 
     first_response.setdefault("recordMap", {})["block"] = merged_blocks
+    if _is_copied_shell_page(notion_public_id, merged_blocks):
+        source_id = _copied_from_block_id((merged_blocks.get(notion_public_id) or {}).get("value", {}))
+        if source_id and source_id != notion_public_id:
+            source_tree = get_block_tree(source_id, space_id, token_v2, user_id)
+            return _alias_root_id(source_tree, notion_public_id, source_id)
     return first_response
 
 

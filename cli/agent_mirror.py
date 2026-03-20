@@ -34,8 +34,12 @@ AGENTS_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.y
 MODEL_ALIASES = {
     "opus": "avocado-froyo-medium",
     "sonnet": "almond-croissant-low",
+    "haiku": "anthropic-haiku-4.5",
     "auto": None,
     "chatgpt": "oval-kumquat-medium",
+    "gpt52": "oatmeal-cookie",
+    "gpt54mini": "otaheite-apple-medium",
+    "gemini": "gingerbread",
     "minimax": "fireworks-minimax-m2.5",
 }
 

@@ -16,9 +16,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
-    from . import config, notion_api
+    from . import config, lab_topology, notion_api
 except ImportError:
-    import config, notion_api
+    import config, lab_topology, notion_api
 
 try:
     from .dispatch import REDACTION_CONFIG, ENV_RESTRICTIONS
@@ -383,6 +383,43 @@ def check_lab_loop(
     return violations, dict(counters)
 
 
+def check_evidence_dossier(
+    client: notion_api.NotionAPIClient,
+) -> tuple[list[Violation], dict[str, int]]:
+    """E.11: Publication gate — no Load-bearing + Unchecked claims in Evidence Dossier."""
+    violations: list[Violation] = []
+    counters: Counter[str] = Counter()
+
+    if not CFG.evidence_dossier_db_id:
+        return violations, dict(counters)
+
+    unchecked_load_bearing = client.query_all(
+        CFG.evidence_dossier_db_id,
+        filter_payload={
+            "and": [
+                {"property": "Fragility", "select": {"equals": "Load-bearing"}},
+                {"property": "Verification Status", "select": {"equals": "Unchecked"}},
+            ]
+        },
+    )
+
+    for page in unchecked_load_bearing:
+        props = page.get("properties", {})
+        claim = _get_title(props, "Claim")
+        section = _get_select(props, "Section") or "?"
+        claim_type = _get_select(props, "Claim Type") or "unknown"
+        _record(
+            violations,
+            "E.11",
+            "MUST-FIX",
+            f"§{section}: {claim[:80]}",
+            f"load-bearing {claim_type} is unchecked — publication gate blocked",
+        )
+        counters["e11"] += 1
+
+    return violations, dict(counters)
+
+
 def summarize_counts(prompt_violations: list[Violation], loop_counts: dict[str, int]) -> None:
     print("\n== Lab-Loop-v1 Scorecard ==")
     print(f"Prompt invariants: {len(prompt_violations)}")
@@ -398,6 +435,50 @@ def summarize_counts(prompt_violations: list[Violation], loop_counts: dict[str, 
     print(f"Closed-without-verdict (E.8A): {loop_counts.get('e8a', 0)}")
     print(f"Redaction incidents (E.9): {loop_counts.get('e9', 0)}")
     print(f"Status advancement violations (E.10): {loop_counts.get('e10', 0)}")
+    print(f"Publication gate (E.11): {loop_counts.get('e11', 0)}")
+    print(f"Control-plane drift (T.*): {loop_counts.get('t', 0)}")
+
+
+def check_control_plane_drift(work_items: list[dict[str, Any]]) -> tuple[list[Violation], dict[str, int]]:
+    violations: list[Violation] = []
+    try:
+        snapshot = lab_topology.compile_snapshot()
+        recent = sorted(
+            work_items,
+            key=lambda item: item.get("last_edited_time") or item.get("created_time") or "",
+            reverse=True,
+        )[:lab_topology.DEFAULT_LOOKBACK_LIMIT]
+        report = lab_topology.evaluate_drift(snapshot, recent_work_items=recent)
+    except Exception as exc:
+        _record(
+            violations,
+            "T.0",
+            "MUST-FIX",
+            "Control Plane",
+            f"unable to compile live topology: {exc}",
+        )
+        return violations, {"t": len(violations)}
+
+    for finding in report.get("findings", []):
+        _record(
+            violations,
+            finding["code"],
+            finding["severity"],
+            finding["subject"],
+            finding["detail"],
+        )
+
+    recent_error = report.get("metadata", {}).get("recent_query_error")
+    if recent_error:
+        _record(
+            violations,
+            "T.7",
+            "INFO",
+            "Control Plane",
+            f"recent Work Item query unavailable during drift audit: {recent_error}",
+        )
+
+    return violations, {"t": len(violations)}
 
 
 def check_invariants(client: notion_api.NotionAPIClient) -> int:
@@ -412,12 +493,23 @@ def check_invariants(client: notion_api.NotionAPIClient) -> int:
     project_issue_index = build_project_issue_index(projects)
     audit_log_counts = build_audit_log_counts(audit_logs)
     loop_violations, loop_counts = check_lab_loop(client, work_items, project_issue_index, audit_log_counts)
+    dossier_violations, dossier_counts = check_evidence_dossier(client)
+    control_plane_violations, control_plane_counts = check_control_plane_drift(work_items)
+    loop_counts.update(dossier_counts)
+    loop_counts.update(control_plane_counts)
 
     _print_section("Prompt Engineering", prompt_violations)
     _print_section("Lab-Loop-v1", loop_violations)
+    _print_section("Evidence Dossier", dossier_violations)
+    _print_section("Control Plane", control_plane_violations)
     summarize_counts(prompt_violations, loop_counts)
 
-    total_blocking = _blocking_violation_count(prompt_violations) + _blocking_violation_count(loop_violations)
+    total_blocking = (
+        _blocking_violation_count(prompt_violations)
+        + _blocking_violation_count(loop_violations)
+        + _blocking_violation_count(dossier_violations)
+        + _blocking_violation_count(control_plane_violations)
+    )
     if total_blocking == 0:
         print("\n--- Audit Result: Lab is MATHEMATICALLY CONSISTENT ---")
     else:

@@ -30,6 +30,7 @@ import cookie_extract
 import notion_api
 import notion_client
 import config
+import lab_topology
 from utils import _to_dashed_uuid, _name_to_key
 
 # Use config instance
@@ -91,6 +92,20 @@ def _save_registry(registry: dict) -> None:
             yaml.dump(registry, f, default_flow_style=False, sort_keys=False)
         _registry_cache = registry
         _registry_mtime = os.path.getmtime(AGENTS_YAML)
+
+
+def _resolve_space_id(token: str, user_id: str | None) -> str:
+    """Resolve the active workspace the same way live topology compilation does."""
+    registry = _load_registry()
+    for cfg in registry.values():
+        if cfg.get("space_id"):
+            return cfg["space_id"]
+
+    spaces = notion_client.get_user_spaces(token)
+    if len(spaces) == 1:
+        return spaces[0]["id"]
+
+    raise ValueError("Unable to determine Notion space ID for workspace agent operations.")
 
 
 TEMPLATE_DATA_JSON = os.path.expanduser(
@@ -352,7 +367,8 @@ def list_workspace_agents() -> str:
     Returns name, notion_internal_id, space_id, and notion_public_id for every agent.
     """
     token, user_id = _get_auth()
-    agents = notion_client.get_all_workspace_agents(CFG.space_id, token, user_id)
+    space_id = _resolve_space_id(token, user_id)
+    agents = notion_client.get_all_workspace_agents(space_id, token, user_id)
     if not agents:
         return "No agents found in workspace."
     lines = []
@@ -376,7 +392,8 @@ def sync_registry() -> str:
     Returns a summary of what was added vs. already present.
     """
     token, user_id = _get_auth()
-    agents = notion_client.get_all_workspace_agents(CFG.space_id, token, user_id)
+    space_id = _resolve_space_id(token, user_id)
+    agents = notion_client.get_all_workspace_agents(space_id, token, user_id)
     if not agents:
         return "No agents found in workspace."
 
@@ -675,7 +692,7 @@ def get_conversation(thread: str, format: str = "json") -> str:
 @auth_retry
 def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None,
                     new_thread: bool = False, wait: bool = False,
-                    timeout: int = 120) -> str:
+                    timeout: int = 180) -> str:
     """
     Send a message to a Notion AI agent and trigger a response.
 
@@ -725,6 +742,11 @@ def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None,
             created_new = True
             print(f"Created first thread: {thread_id}", file=sys.stderr)
 
+    # Read model from the live workflow record (what set_agent_model sets),
+    # not from agents.yaml which never has a model field.
+    wf = notion_client.get_workflow_record(cfg['notion_internal_id'], token, user_id)
+    model_type = (wf.get('data', {}).get('model') or {}).get('type') or 'auto'
+
     msg_id = notion_client.send_agent_message(
         thread_id=thread_id,
         space_id=cfg['space_id'],
@@ -732,7 +754,7 @@ def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None,
         content=message,
         token_v2=token,
         user_id=user_id,
-        model=cfg.get('model', 'avocado-froyo-medium'),
+        model=model_type,
     )
 
     thread_note = " (new thread)" if created_new else ""
@@ -763,9 +785,8 @@ def _get_collection_prop_names(collection_id: str) -> dict[str, str]:
         if collection_id in _collection_schemas:
             return _collection_schemas[collection_id]
     token, user_id = _get_auth()
-    payload = {"requests": [{"id": collection_id, "table": "collection"}]}
-    data = notion_client._post("getRecordValues", payload, token, user_id)
-    schema = data.get("results", [{}])[0].get("value", {}).get("schema", {})
+    data = notion_client.read_records("collection", [collection_id], token, user_id)
+    schema = data.get(collection_id, {}).get("schema", {})
     prop_map = {pid: pdef.get("name", pid) for pid, pdef in schema.items()}
     with _collection_lock:
         _collection_schemas[collection_id] = prop_map
@@ -884,7 +905,8 @@ def get_agent_triggers(agent: str = "all") -> str:
     token, user_id = _get_auth()
 
     if agent == "all":
-        agents = notion_client.get_all_workspace_agents(CFG.space_id, token, user_id)
+        space_id = _resolve_space_id(token, user_id)
+        agents = notion_client.get_all_workspace_agents(space_id, token, user_id)
         if not agents:
             return "No agents found in workspace."
         lines = []
@@ -983,6 +1005,52 @@ def get_db_automations(db: str) -> str:
         lines.append("")
 
     return "\n".join(lines).strip()
+
+
+@mcp.tool()
+@auth_retry
+def get_lab_topology() -> str:
+    """
+    Compile the live Lab topology and return a compact summary.
+
+    Uses live workflow records, triggers, automations, permissions, and the
+    repo-owned contract manifest. No cached snapshot is reused.
+    """
+    token, user_id = _get_auth()
+    snapshot = lab_topology.compile_snapshot(token, user_id)
+    return lab_topology.render_snapshot_summary(snapshot)
+
+
+@mcp.tool()
+@auth_retry
+def audit_lab_topology() -> str:
+    """
+    Run control-plane drift checks against the live Lab topology.
+
+    Returns trigger, permission, publish-state, and contract drift findings.
+    """
+    token, user_id = _get_auth()
+    snapshot = lab_topology.compile_snapshot(token, user_id)
+    recent_items, recent_error = lab_topology.fetch_recent_work_items()
+    report = lab_topology.evaluate_drift(
+        snapshot,
+        recent_work_items=recent_items,
+        recent_error=recent_error,
+    )
+    return lab_topology.render_drift_report(report)
+
+
+@mcp.tool()
+@auth_retry
+def trace_work_item(page_id: str) -> str:
+    """
+    Reconstruct the contract path for a single Work Item.
+
+    page_id: Work Item public UUID (dashed or dashless).
+    """
+    token, user_id = _get_auth()
+    snapshot = lab_topology.compile_snapshot(token, user_id)
+    return lab_topology.trace_work_item(page_id, snapshot)
 
 
 
@@ -1254,6 +1322,12 @@ def set_agent_model(
     model: Model display name or codename. Accepted values:
       - "opus" / "avocado-froyo-medium" → Opus 4.6
       - "sonnet" / "almond-croissant-low" → Sonnet 4.6
+      - "haiku" / "anthropic-haiku-4.5" → Haiku 4.5
+      - "gpt 5.2" / "oatmeal-cookie" → GPT-5.2
+      - "gpt 5.4" / "oval-kumquat-medium" → GPT-5.4
+      - "gpt 5.4 mini" / "gpt 5.4 nano" / "otaheite-apple-medium" → GPT-5.4 mini/nano
+      - "gemini" / "gingerbread" → Gemini 3 Flash
+      - "minimax" / "fireworks-minimax-m2.5" → Minimax M2.5
       - "auto" → Auto (Notion picks)
       - Or any raw codename string.
     publish: Whether to publish the agent afterward (default: True).
@@ -1264,9 +1338,19 @@ def set_agent_model(
         "opus 4.6": "avocado-froyo-medium",
         "sonnet": "almond-croissant-low",
         "sonnet 4.6": "almond-croissant-low",
+        "haiku": "anthropic-haiku-4.5",
+        "haiku 4.5": "anthropic-haiku-4.5",
         "chatgpt": "oval-kumquat-medium",
         "chatgpt 5.4": "oval-kumquat-medium",
         "gpt 5.4": "oval-kumquat-medium",
+        "gpt 5.4 mini": "otaheite-apple-medium",
+        "chatgpt 5.4 mini": "otaheite-apple-medium",
+        "gpt 5.4 nano": "otaheite-apple-medium",
+        "chatgpt 5.4 nano": "otaheite-apple-medium",
+        "gpt 5.2": "oatmeal-cookie",
+        "chatgpt 5.2": "oatmeal-cookie",
+        "gemini": "gingerbread",
+        "gemini 3 flash": "gingerbread",
         "auto": "auto",
     }
     model_type = aliases.get(model.lower().strip(), model.strip())

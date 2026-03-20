@@ -1,0 +1,317 @@
+contracts:
+  - name: dispatch_via_native_dispatch
+    source: work_items
+    target: native_dispatch_webhook
+    database: work_items
+    trigger_fields:
+      - Dispatch Via
+    produced_fields:
+      - Dispatch Requested Received At
+    required_artifacts:
+      - Dispatch Requested Received At
+    selector: {}
+    upstream_complete_fields:
+      - Dispatch Via
+    evidence_sources:
+      - kind: native_automation
+        database: work_items
+        note: Dispatch Via change stamps Dispatch Requested Received At and calls the webhook.
+
+  - name: dispatch_request_to_dispatcher
+    source: work_items
+    target: lab_dispatcher
+    database: work_items
+    trigger_fields:
+      - Dispatch Requested Received At
+    consumed_fields:
+      - Dispatch Requested Consumed At
+    produced_fields:
+      - Prompt Notes
+      - GitHub Issue URL
+      - Prompt Request Received At
+    required_artifacts:
+      - Dispatch Requested Consumed At
+      - Prompt Request Received At
+      - Prompt Notes
+    selector: {}
+    upstream_complete_fields:
+      - Dispatch Requested Received At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: agent_trigger
+        agent: lab_dispatcher
+      - kind: repo_enforced
+        path: cli/dispatch.py
+
+  - name: prompt_request_to_prompt_architect
+    source: work_items
+    target: prompt_architect_reasoning_engineering
+    database: work_items
+    trigger_fields:
+      - Prompt Request Received At
+    consumed_fields:
+      - Prompt Request Consumed At
+    produced_fields:
+      - Prompt Drafts
+      - Run Date
+      - Status
+    required_artifacts:
+      - Prompt Drafts
+      - Run Date
+    selector: {}
+    upstream_complete_fields:
+      - Prompt Request Received At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: agent_trigger
+        agent: prompt_architect_reasoning_engineering
+      - kind: instruction_contract
+        agent: prompt_architect_reasoning_engineering
+
+  - name: execution_final_return
+    source: execution_plane
+    target: work_items
+    database: work_items
+    trigger_fields:
+      - run_id
+    produced_fields:
+      - Return Received At
+      - Return Consumed At
+      - Outcome
+    required_artifacts:
+      - Return Received At
+    selector: {}
+    upstream_complete_fields:
+      - run_id
+    evidence_sources:
+      - kind: repo_enforced
+        path: cli/dispatch.py
+      - kind: repo_enforced
+        path: cli/dispatch_tools.py
+
+  - name: return_received_to_intake_clerk
+    source: work_items
+    target: lab_intake_clerk
+    database: work_items
+    trigger_fields:
+      - Return Received At
+    consumed_fields:
+      - Librarian Request Received At
+    produced_fields:
+      - Outcome
+      - Status
+      - Librarian Request Received At
+    required_artifacts:
+      - Outcome
+      - Librarian Request Received At
+    selector: {}
+    upstream_complete_fields:
+      - Return Received At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: agent_trigger
+        agent: lab_intake_clerk
+      - kind: instruction_contract
+        agent: lab_intake_clerk
+
+  - name: return_received_to_shadow_requested
+    source: work_items
+    target: native_shadow_request
+    database: work_items
+    trigger_fields:
+      - Return Received At
+    produced_fields:
+      - Shadow Requested
+    required_artifacts:
+      - Shadow Requested
+    selector: {}
+    upstream_complete_fields:
+      - Return Received At
+    evidence_sources:
+      - kind: native_automation
+        database: work_items
+        note: Return Received At change stamps Shadow Requested.
+
+  - name: librarian_request_to_librarian
+    source: work_items
+    target: lab_librarian_knowledge_synthesis
+    database: work_items
+    trigger_fields:
+      - Librarian Request Received At
+    consumed_fields:
+      - Librarian Request Consumed At
+    produced_fields:
+      - Findings
+      - Verdict
+      - Status
+      - Synthesis Completed At
+    required_artifacts:
+      - Librarian Request Consumed At
+      - Findings
+      - Synthesis Completed At
+    selector: {}
+    upstream_complete_fields:
+      - Librarian Request Received At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: agent_trigger
+        agent: lab_librarian_knowledge_synthesis
+      - kind: instruction_contract
+        agent: lab_librarian_knowledge_synthesis
+
+  - name: synthesis_completed_to_research_designer
+    source: work_items
+    target: lab_research_designer
+    database: work_items
+    trigger_fields:
+      - Synthesis Completed At
+      - Status
+    produced_fields:
+      - Superseded By
+    required_artifacts: []
+    selector: {}
+    upstream_complete_fields:
+      - Synthesis Completed At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: agent_trigger
+        agent: lab_research_designer
+      - kind: instruction_contract
+        agent: lab_research_designer
+
+  - name: librarian_terminal_to_triage_router
+    source: lab_librarian_knowledge_synthesis
+    target: lab_triage_router
+    database: work_items
+    trigger_fields:
+      - Findings
+      - Status
+      - Type
+      - FOSS Recon Consumed At
+    produced_fields:
+      - Routing Signal
+      - Routing Target
+      - Triage Routed At
+    required_artifacts:
+      - Routing Signal
+      - Routing Target
+      - Triage Routed At
+    selector: {}
+    upstream_complete_fields:
+      - Synthesis Completed At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: instruction_contract
+        agent: lab_triage_router
+
+  - name: triage_spawn_to_research_designer
+    source: lab_triage_router
+    target: lab_research_designer
+    database: work_items
+    trigger_fields:
+      - Routing Signal
+      - Triage Routed At
+    produced_fields:
+      - Superseded By
+    required_artifacts: []
+    selector:
+      Routing Signal:
+        - SPAWN_IMPL
+        - SPAWN_INTEGRATION
+        - SPAWN_DS
+        - SPAWN_FOLLOWUP
+        - ADVANCE
+    upstream_complete_fields:
+      - Triage Routed At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: instruction_contract
+        agent: lab_triage_router
+      - kind: instruction_contract
+        agent: lab_research_designer
+
+  - name: triage_terminal_to_return_protocol
+    source: lab_triage_router
+    target: return_protocol_agent
+    database: work_items
+    trigger_fields:
+      - Routing Signal
+      - Triage Routed At
+    produced_fields: []
+    required_artifacts: []
+    selector:
+      Routing Signal:
+        - KILL_LINE
+        - CLOSE_LOOP
+        - RESOLVE_LINE
+    upstream_complete_fields:
+      - Triage Routed At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: instruction_contract
+        agent: lab_triage_router
+      - kind: instruction_contract
+        agent: return_protocol_agent
+
+  - name: done_status_to_return_protocol
+    source: work_items
+    target: return_protocol_agent
+    database: work_items
+    trigger_fields:
+      - Status
+    produced_fields: []
+    required_artifacts: []
+    selector:
+      Status:
+        - Done
+    upstream_complete_fields:
+      - Status
+    required_access: read_and_write
+    evidence_sources:
+      - kind: agent_trigger
+        agent: return_protocol_agent
+      - kind: instruction_contract
+        agent: return_protocol_agent
+
+  - name: design_spec_terminal_to_guild
+    source: work_items
+    target: guild_of_the_torre_degli_angeli
+    database: work_items
+    trigger_fields:
+      - Type
+      - Status
+    produced_fields:
+      - FOSS Recon Consumed At
+    required_artifacts:
+      - FOSS Recon Consumed At
+    selector:
+      Type:
+        - Design Spec
+      Status:
+        - Complete
+        - Done
+        - Passed
+    upstream_complete_fields:
+      - Status
+    required_access: read_and_write
+    evidence_sources:
+      - kind: agent_trigger
+        agent: guild_of_the_torre_degli_angeli
+      - kind: instruction_contract
+        agent: guild_of_the_torre_degli_angeli
+
+  - name: guild_recon_to_project_comment
+    source: guild_of_the_torre_degli_angeli
+    target: guild_of_the_torre_degli_angeli
+    database: lab_projects
+    trigger_fields: []
+    produced_fields: []
+    required_artifacts:
+      - project_comment
+    selector: {}
+    upstream_complete_fields:
+      - FOSS Recon Consumed At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: instruction_contract
+        agent: guild_of_the_torre_degli_angeli

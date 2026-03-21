@@ -47,6 +47,7 @@ contracts:
     source: work_items
     target: prompt_architect_reasoning_engineering
     database: work_items
+    rollout_started_at: "2026-03-21T00:00:00+00:00"
     trigger_fields:
       - Prompt Request Received At
     consumed_fields:
@@ -163,12 +164,16 @@ contracts:
     source: work_items
     target: lab_research_designer
     database: work_items
+    rollout_started_at: "2026-03-21T00:00:00+00:00"
     trigger_fields:
       - Synthesis Completed At
       - Status
     produced_fields:
+      - Synthesis Consumed At
+      - Disposition
       - Superseded By
-    required_artifacts: []
+    required_artifacts:
+      - Synthesis Consumed At
     selector: {}
     upstream_complete_fields:
       - Synthesis Completed At
@@ -183,6 +188,7 @@ contracts:
     source: lab_librarian_knowledge_synthesis
     target: lab_triage_router
     database: work_items
+    rollout_started_at: "2026-03-21T00:00:00+00:00"
     trigger_fields:
       - Findings
       - Status
@@ -277,6 +283,7 @@ contracts:
     source: work_items
     target: guild_of_the_torre_degli_angeli
     database: work_items
+    rollout_started_at: "2026-03-21T00:00:00+00:00"
     trigger_fields:
       - Type
       - Status
@@ -292,7 +299,7 @@ contracts:
         - Done
         - Passed
     upstream_complete_fields:
-      - Status
+      - Synthesis Completed At
     required_access: read_and_write
     evidence_sources:
       - kind: agent_trigger

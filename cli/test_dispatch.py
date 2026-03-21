@@ -40,6 +40,12 @@ def _make_props(
     run_id: str = "",
     github_url: str = "",
     project_ids: list[str] | None = None,
+    blocked_reason: str = "",
+    retry_count: int | None = None,
+    execution_budget: int | float | None = None,
+    concurrency_group: str = "",
+    escalation_level: str | None = None,
+    status: str = "Not Started",
 ) -> dict:
     """Build a mock Notion page properties dict."""
     props = {
@@ -57,12 +63,17 @@ def _make_props(
         },
         "Prompt Notes": {"type": "rich_text", "rich_text": []},
         "GitHub Issue URL": {"type": "url", "url": github_url or None},
-        "Status": {"type": "status", "status": {"name": "Not Started"}},
+        "Status": {"type": "status", "status": {"name": status}},
         "Type": {"type": "select", "select": {"name": item_type} if item_type else None},
         "Project": {
             "type": "relation",
             "relation": [{"id": pid} for pid in (project_ids or [])],
         },
+        "Blocked Reason": {"type": "rich_text", "rich_text": [{"plain_text": blocked_reason}]} if blocked_reason else {"type": "rich_text", "rich_text": []},
+        "Retry Count": {"type": "number", "number": retry_count},
+        "Execution Budget": {"type": "number", "number": execution_budget},
+        "Concurrency Group": {"type": "rich_text", "rich_text": [{"plain_text": concurrency_group}]} if concurrency_group else {"type": "rich_text", "rich_text": []},
+        "Escalation Level": {"type": "select", "select": {"name": escalation_level} if escalation_level else None},
     }
     if execution_lane:
         props["Execution Lane"] = {"type": "select", "select": {"name": execution_lane}}
@@ -85,12 +96,56 @@ def _make_props(
     return props
 
 
-def _mock_client(props: dict, work_item_id: str | None = None) -> MagicMock:
+def _project_page(
+    name: str = "Test Project",
+    max_active_items: int | None = None,
+    *,
+    focus: bool = False,
+    min_terminal_value: str | None = None,
+    fork_budget: int | float | None = None,
+) -> dict:
+    return {
+        "id": str(uuid.uuid4()),
+        "properties": {
+            "Project Name": {"type": "title", "title": [{"plain_text": name}]},
+            "Max Active Items": {"type": "number", "number": max_active_items},
+            "Focus": {"type": "checkbox", "checkbox": focus},
+            "Min Terminal Value": {"type": "select", "select": {"name": min_terminal_value} if min_terminal_value else None},
+            "Fork Budget": {"type": "number", "number": fork_budget},
+        },
+    }
+
+
+def _mock_client(
+    props: dict,
+    work_item_id: str | None = None,
+    *,
+    project_pages: dict[str, dict] | None = None,
+    query_results: list[list[dict]] | None = None,
+) -> MagicMock:
     """Create a mock NotionAPIClient that returns given properties."""
     client = MagicMock()
     wid = work_item_id or str(uuid.uuid4())
-    client.retrieve_page.return_value = {"id": wid, "properties": props}
-    client.query_all.return_value = []
+    pages = {wid: {"id": wid, "properties": props}}
+    pages.update(project_pages or {})
+
+    def _retrieve(page_id: str):
+        return pages[page_id]
+
+    client.retrieve_page.side_effect = _retrieve
+    if query_results is None:
+        client.query_all.return_value = []
+    else:
+        queued = list(query_results)
+
+        def _query_all(*args, **kwargs):
+            filter_payload = kwargs.get("filter_payload") or {}
+            title_filter = (filter_payload.get("title") or {}).get("equals")
+            if title_filter in {"Pre-Flight Mode", "Max Cascade Depth"}:
+                return []
+            return queued.pop(0) if queued else []
+
+        client.query_all.side_effect = _query_all
     return client
 
 
@@ -224,6 +279,53 @@ class TestValidation:
         result = self._build(consumed_at="2026-03-10T00:00:00Z")
         assert any("V10" in e for e in result["errors"])
 
+    def test_v15_blocked_reason_blocks_dispatch(self):
+        result = self._build(blocked_reason="Waiting on Sam")
+        assert any("V15" in e for e in result["errors"])
+
+    def test_v16_escalation_level_blocks_dispatch(self):
+        result = self._build(escalation_level="Needs Sam")
+        assert any("V16" in e for e in result["errors"])
+
+    def test_v17_project_cap_blocks_dispatch(self):
+        wid = str(uuid.uuid4())
+        project_id = str(uuid.uuid4())
+        props = _make_props(project_ids=[project_id])
+        project_page = _project_page(max_active_items=1)
+        active_page = {"id": str(uuid.uuid4()), "properties": _make_props(project_ids=[project_id], consumed_at="2026-03-10T00:00:00Z", status="In Progress")}
+        client = _mock_client(
+            props,
+            wid,
+            project_pages={project_id: project_page},
+            query_results=[[active_page]],
+        )
+        result = dispatch.build_dispatch_packet(wid, client)
+        assert any("V17" in e for e in result["errors"])
+
+    def test_v18_non_focus_project_blocked_when_focus_candidates_exist(self):
+        wid = str(uuid.uuid4())
+        focused_project_id = str(uuid.uuid4())
+        non_focus_project_id = str(uuid.uuid4())
+        props = _make_props(project_ids=[non_focus_project_id])
+        focused_page = {
+            "id": str(uuid.uuid4()),
+            "properties": _make_props(name="FOCUS-READY", project_ids=[focused_project_id]),
+        }
+        non_focus_page = {"id": wid, "properties": props}
+        project_pages = {
+            focused_project_id: _project_page(name="Focused", focus=True),
+            non_focus_project_id: _project_page(name="Held", focus=False),
+        }
+        client = _mock_client(
+            props,
+            wid,
+            project_pages=project_pages,
+            query_results=[[], [focused_page, non_focus_page], []],
+        )
+
+        result = dispatch.build_dispatch_packet(wid, client)
+        assert any("V18" in e for e in result["errors"])
+
 
 class TestHappyPath:
     """Test successful packet building."""
@@ -247,7 +349,45 @@ class TestHappyPath:
         assert packet["environment"] == "dev"  # default
         assert packet["constraints"]["can_code"] is True
         assert packet["constraints"]["can_browse"] is True
+        assert packet["retry_count"] == 0
+        assert packet["escalation_level"] == "Normal"
         assert uuid.UUID(packet["run_id"])  # valid UUID
+
+    def test_packet_includes_queue_metadata(self):
+        wid = str(uuid.uuid4())
+        props = _make_props(
+            execution_budget=45,
+            concurrency_group="notion-forge-main",
+            retry_count=2,
+            escalation_level="Normal",
+        )
+        project_id = str(uuid.uuid4())
+        props["Project"] = {"type": "relation", "relation": [{"id": project_id}]}
+        client = _mock_client(
+            props,
+            wid,
+            project_pages={
+                project_id: _project_page(
+                    name="notion-forge",
+                    focus=True,
+                    min_terminal_value="Meaningful",
+                    fork_budget=2,
+                )
+            },
+            query_results=[[], [{"id": wid, "properties": props}], []],
+        )
+        result = dispatch.build_dispatch_packet(wid, client)
+
+        assert result["errors"] == []
+        packet = result["packet"]
+        assert packet["execution_budget"] == 45
+        assert packet["concurrency_group"] == "notion-forge-main"
+        assert packet["retry_count"] == 2
+        assert packet["escalation_level"] == "Normal"
+        assert packet["project_focus"] is True
+        assert packet["project_min_terminal_value"] == "Meaningful"
+        assert packet["project_fork_budget"] == 2
+        assert packet["portfolio_focus_active"] is True
 
     def test_explicit_lane_overrides_default(self):
         """Explicit Execution Lane overrides Dispatch Via default."""
@@ -318,7 +458,7 @@ def test_final_return_schema_structure():
 def test_get_dispatchable_items_empty():
     """Returns empty list when no items match."""
     client = MagicMock()
-    client.query_all.return_value = []
+    client.query_all.side_effect = [[], []]
 
     with patch("dispatch.get_config") as mock_cfg:
         mock_cfg.return_value = MagicMock(work_items_db_id="fake-db-id")
@@ -334,7 +474,8 @@ def test_get_dispatchable_items_parses_results():
         "properties": _make_props(name="TEST-1", dispatch_via="Cursor"),
     }
     client = MagicMock()
-    client.query_all.return_value = [page]
+    client.query_all.side_effect = [[page], []]
+    client.retrieve_page.return_value = _project_page()
 
     with patch("dispatch.get_config") as mock_cfg:
         mock_cfg.return_value = MagicMock(work_items_db_id="fake-db-id")
@@ -343,3 +484,91 @@ def test_get_dispatchable_items_parses_results():
     assert len(items) == 1
     assert items[0]["name"] == "TEST-1"
     assert items[0]["dispatch_via"] == "Cursor"
+    assert items[0]["retry_count"] == 0
+    assert items[0]["escalation_level"] == "Normal"
+    assert items[0]["project_focus"] is False
+
+
+def test_get_dispatchable_items_excludes_blocked_and_escalated_rows():
+    blocked_page = {
+        "id": str(uuid.uuid4()),
+        "properties": _make_props(name="BLOCKED-1", blocked_reason="Waiting"),
+    }
+    escalated_page = {
+        "id": str(uuid.uuid4()),
+        "properties": _make_props(name="ESC-1", escalation_level="Needs Sam"),
+    }
+    client = MagicMock()
+    client.query_all.side_effect = [[blocked_page, escalated_page], []]
+
+    with patch("dispatch.get_config") as mock_cfg:
+        mock_cfg.return_value = MagicMock(work_items_db_id="fake-db-id")
+        items = dispatch.get_dispatchable_items(client)
+
+    assert items == []
+
+
+def test_get_dispatchable_items_enforces_project_cap_and_orders_by_age_then_retry():
+    project_id = str(uuid.uuid4())
+    older = {
+        "id": str(uuid.uuid4()),
+        "properties": _make_props(
+            name="OLDER-1",
+            received_at="2026-01-01T00:00:00Z",
+            project_ids=[project_id],
+            retry_count=2,
+        ),
+    }
+    newer_low_retry = {
+        "id": str(uuid.uuid4()),
+        "properties": _make_props(
+            name="NEWER-1",
+            received_at="2026-01-02T00:00:00Z",
+            retry_count=0,
+        ),
+    }
+    active_page = {
+        "id": str(uuid.uuid4()),
+        "properties": _make_props(
+            name="ACTIVE-1",
+            project_ids=[project_id],
+            consumed_at="2026-01-01T01:00:00Z",
+            status="In Progress",
+        ),
+    }
+    project_page = _project_page(name="Capped Project", max_active_items=1)
+    client = MagicMock()
+    client.query_all.side_effect = [[older, newer_low_retry], [active_page]]
+    client.retrieve_page.side_effect = lambda page_id: project_page
+
+    with patch("dispatch.get_config") as mock_cfg:
+        mock_cfg.return_value = MagicMock(work_items_db_id="fake-db-id")
+        items = dispatch.get_dispatchable_items(client)
+
+    assert [item["name"] for item in items] == ["NEWER-1"]
+
+
+def test_get_dispatchable_items_prefers_focus_projects_when_available():
+    focus_project_id = str(uuid.uuid4())
+    other_project_id = str(uuid.uuid4())
+    focus_page = {
+        "id": str(uuid.uuid4()),
+        "properties": _make_props(name="FOCUS-1", project_ids=[focus_project_id]),
+    }
+    non_focus_page = {
+        "id": str(uuid.uuid4()),
+        "properties": _make_props(name="OTHER-1", project_ids=[other_project_id]),
+    }
+    client = MagicMock()
+    client.query_all.side_effect = [[focus_page, non_focus_page], []]
+    project_pages = {
+        focus_project_id: _project_page(name="Focused", focus=True),
+        other_project_id: _project_page(name="Other"),
+    }
+    client.retrieve_page.side_effect = lambda page_id: project_pages[page_id]
+
+    with patch("dispatch.get_config") as mock_cfg:
+        mock_cfg.return_value = MagicMock(work_items_db_id="fake-db-id")
+        items = dispatch.get_dispatchable_items(client)
+
+    assert [item["name"] for item in items] == ["FOCUS-1"]

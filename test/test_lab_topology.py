@@ -22,20 +22,49 @@ def _make_snapshot() -> dict:
                 "drra": "Dispatch Requested Received At",
                 "drca": "Dispatch Requested Consumed At",
                 "pn": "Prompt Notes",
+                "sc": "Synthesis Completed At",
+                "scoa": "Synthesis Consumed At",
+                "disp": "Disposition",
+                "rs": "Routing Signal",
+                "sb": "Superseded By",
+                "proj": "Project",
+                "type": "Type",
             },
             "property_name_to_type": {
                 "Dispatch Requested Received At": "date",
                 "Dispatch Requested Consumed At": "date",
                 "Prompt Notes": "rich_text",
+                "Synthesis Completed At": "date",
+                "Synthesis Consumed At": "date",
+                "Disposition": "select",
+                "Routing Signal": "select",
+                "Superseded By": "relation",
+                "Project": "relation",
+                "Type": "select",
             },
             "property_name_to_id": {
                 "Dispatch Requested Received At": "drra",
                 "Dispatch Requested Consumed At": "drca",
                 "Prompt Notes": "pn",
+                "Synthesis Completed At": "sc",
+                "Synthesis Consumed At": "scoa",
+                "Disposition": "disp",
+                "Routing Signal": "rs",
+                "Superseded By": "sb",
+                "Project": "proj",
+                "Type": "type",
             },
             "options": {},
         },
         "sources": ["test"],
+    }
+    project_policy = {
+        "id": "project-1",
+        "name": "Work Items Project",
+        "focus": True,
+        "max_active_items": 2,
+        "min_terminal_value": "Any",
+        "fork_budget": 1,
     }
     agent = {
         "key": "lab_dispatcher",
@@ -148,6 +177,7 @@ def _make_snapshot() -> dict:
         "databases": [database],
         "agents": [agent],
         "automations": [],
+        "project_policies": [project_policy],
         "contracts": [contract],
     }
     snapshot["indexes"] = {
@@ -155,11 +185,20 @@ def _make_snapshot() -> dict:
         "database_by_key": {"work_items": database},
         "database_by_public_id": {database["notion_public_id"]: database},
         "database_by_internal_id": {database["notion_internal_id"]: database},
+        "project_policy_by_id": {project_policy["id"]: project_policy},
     }
     return snapshot
 
 
-def _make_recent_page(*, prompt_notes: str = "") -> dict:
+def _make_recent_page(
+    *,
+    prompt_notes: str = "",
+    disposition: str | None = None,
+    routing_signal: str | None = None,
+    superseded_by: list[str] | None = None,
+    item_type: str | None = None,
+    project_ids: list[str] | None = None,
+) -> dict:
     return {
         "id": "page-1",
         "created_time": "2026-03-19T00:00:00Z",
@@ -173,6 +212,34 @@ def _make_recent_page(*, prompt_notes: str = "") -> dict:
             "Prompt Notes": {
                 "type": "rich_text",
                 "rich_text": [{"plain_text": prompt_notes}] if prompt_notes else [],
+            },
+            "Synthesis Completed At": {
+                "type": "date",
+                "date": None,
+            },
+            "Synthesis Consumed At": {
+                "type": "date",
+                "date": None,
+            },
+            "Disposition": {
+                "type": "select",
+                "select": {"name": disposition} if disposition else None,
+            },
+            "Routing Signal": {
+                "type": "select",
+                "select": {"name": routing_signal} if routing_signal else None,
+            },
+            "Superseded By": {
+                "type": "relation",
+                "relation": [{"id": successor_id} for successor_id in (superseded_by or [])],
+            },
+            "Project": {
+                "type": "relation",
+                "relation": [{"id": project_id} for project_id in (project_ids or ["project-1"])],
+            },
+            "Type": {
+                "type": "select",
+                "select": {"name": item_type} if item_type else None,
             },
         },
     }
@@ -397,3 +464,126 @@ def test_evaluate_drift_passes_when_required_artifact_is_present():
     report = lab_topology.evaluate_drift(snapshot, recent_work_items=[_make_recent_page(prompt_notes="ready")])
 
     assert not any(finding["code"] == "T.7" for finding in report["findings"])
+
+
+def test_evaluate_drift_flags_missing_synthesis_consumed_at():
+    snapshot = _make_snapshot()
+    snapshot["contracts"].append(
+        {
+            "name": "synthesis_completed_to_research_designer",
+            "source": "work_items",
+            "target": "lab_research_designer",
+            "database": "work_items",
+            "database_label": "Work Items",
+            "database_public_id": snapshot["databases"][0]["notion_public_id"],
+            "database_internal_id": snapshot["databases"][0]["notion_internal_id"],
+            "trigger_fields": ["Synthesis Completed At"],
+            "consumed_fields": [],
+            "produced_fields": ["Synthesis Consumed At"],
+            "required_artifacts": ["Synthesis Consumed At"],
+            "selector": {},
+            "upstream_complete_fields": ["Synthesis Completed At"],
+            "required_access": "read_and_write",
+            "evidence_sources": [],
+            "source_resolved": {"kind": "database", "key": "work_items", "label": "Work Items"},
+            "target_resolved": {"kind": "agent", "key": "lab_dispatcher", "label": "Lab Dispatcher"},
+        }
+    )
+    page = _make_recent_page()
+    page["properties"]["Synthesis Completed At"] = {
+        "type": "date",
+        "date": {"start": "2026-03-19T00:00:00Z"},
+    }
+
+    report = lab_topology.evaluate_drift(snapshot, recent_work_items=[page])
+
+    assert any(
+        finding["code"] == "T.7" and "Synthesis Consumed At" in finding["detail"]
+        for finding in report["findings"]
+    )
+
+
+def test_evaluate_drift_skips_t7_before_contract_rollout():
+    snapshot = _make_snapshot()
+    snapshot["contracts"][0]["rollout_started_at"] = "2026-03-21T00:00:00+00:00"
+    page = _make_recent_page(prompt_notes="")
+    page["properties"]["Dispatch Requested Received At"] = {
+        "type": "date",
+        "date": {"start": "2026-03-19T00:00:00Z"},
+    }
+
+    report = lab_topology.evaluate_drift(snapshot, recent_work_items=[page])
+
+    assert not any(finding["code"] == "T.7" for finding in report["findings"])
+
+
+def test_evaluate_drift_flags_missing_disposition_when_successor_exists():
+    snapshot = _make_snapshot()
+    page = _make_recent_page(superseded_by=["successor-1"])
+    page["properties"]["Synthesis Consumed At"] = {
+        "type": "date",
+        "date": {"start": "2026-03-19T00:00:00Z"},
+    }
+
+    report = lab_topology.evaluate_drift(snapshot, recent_work_items=[page])
+
+    assert any(
+        finding["code"] == "T.9" and "Disposition is empty" in finding["detail"]
+        for finding in report["findings"]
+    )
+
+
+def test_evaluate_drift_flags_repeat_with_different_successor_type():
+    snapshot = _make_snapshot()
+    parent = _make_recent_page(
+        disposition="Repeat",
+        superseded_by=["successor-1"],
+        item_type="Design Spec",
+    )
+    parent["properties"]["Synthesis Consumed At"] = {
+        "type": "date",
+        "date": {"start": "2026-03-19T00:00:00Z"},
+    }
+    successor = _make_recent_page(item_type="Experiment")
+    successor["id"] = "successor-1"
+    successor["properties"]["Item Name"] = {
+        "type": "title",
+        "title": [{"plain_text": "SUCCESSOR-1"}],
+    }
+
+    report = lab_topology.evaluate_drift(snapshot, recent_work_items=[parent, successor])
+
+    assert any(
+        finding["code"] == "T.9" and "different Type" in finding["detail"]
+        for finding in report["findings"]
+    )
+
+
+def test_evaluate_drift_flags_project_fork_budget_exceeded():
+    snapshot = _make_snapshot()
+    first = _make_recent_page(
+        disposition="Fork",
+        superseded_by=["successor-1"],
+        project_ids=["project-1"],
+    )
+    second = _make_recent_page(
+        disposition="Fork",
+        superseded_by=["successor-2"],
+        project_ids=["project-1"],
+    )
+    first["id"] = "fork-1"
+    second["id"] = "fork-2"
+    first["properties"]["Item Name"] = {"type": "title", "title": [{"plain_text": "FORK-1"}]}
+    second["properties"]["Item Name"] = {"type": "title", "title": [{"plain_text": "FORK-2"}]}
+    for page in (first, second):
+        page["properties"]["Synthesis Consumed At"] = {
+            "type": "date",
+            "date": {"start": "2026-03-19T00:00:00Z"},
+        }
+
+    report = lab_topology.evaluate_drift(snapshot, recent_work_items=[first, second])
+
+    assert any(
+        finding["code"] == "T.10" and "fork budget exceeded" in finding["detail"]
+        for finding in report["findings"]
+    )

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
@@ -43,6 +44,13 @@ VALID_ENVIRONMENTS = set(ENV_RESTRICTIONS["environments"].keys())
 DISPATCH_VIA_DEFAULTS = LANE_CAPABILITIES["dispatch_via_defaults"]
 VALID_DISPATCH_VIA = set(DISPATCH_VIA_DEFAULTS.keys())
 VALID_TYPES = {"Gauntlet", "Measurement Track", "Literature Survey", "Design Spec", "Feasibility Analysis", "Implementation", "Operational", "Review", "Experiment", "Fact-Check", "Other"}
+TERMINAL_STATUSES = {"Done", "Passed", "Kill Condition Met", "Inconclusive", "Closed", "Blocked"}
+DEFAULT_MAX_ACTIVE_ITEMS = 2
+DEFAULT_RETRY_COUNT = 0
+DEFAULT_ESCALATION_LEVEL = "Normal"
+BLOCKING_ESCALATION_LEVELS = {"Needs Sam", "Critical"}
+RETRY_ESCALATION_THRESHOLD = 2
+DEFAULT_MIN_TERMINAL_VALUE = "Any"
 
 
 # ── Property extraction helpers ──────────────────────────────────────────────
@@ -87,6 +95,176 @@ def _number(props: dict, key: str) -> int | float | None:
 
 def _relation_ids(props: dict, key: str) -> list[str]:
     return [r["id"] for r in (props.get(key, {}) or {}).get("relation", []) if r.get("id")]
+
+
+def _rich_text_property(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {"rich_text": []}
+    return {"rich_text": [{"type": "text", "text": {"content": value}}]}
+
+
+def _int_value(value: int | float | None, default: int) -> int:
+    if value is None:
+        return default
+    return int(value)
+
+
+def _project_snapshot(
+    project_id: str,
+    client: notion_api.NotionAPIClient,
+    cache: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    cached = cache.get(project_id)
+    if cached is not None:
+        return cached
+
+    snapshot = {
+        "id": project_id,
+        "name": None,
+        "max_active_items": DEFAULT_MAX_ACTIVE_ITEMS,
+        "focus": False,
+        "min_terminal_value": DEFAULT_MIN_TERMINAL_VALUE,
+        "fork_budget": None,
+    }
+    try:
+        project_page = client.retrieve_page(project_id)
+        props = project_page.get("properties", {})
+        snapshot["name"] = _title(props, "Project Name") or None
+        snapshot["max_active_items"] = _int_value(_number(props, "Max Active Items"), DEFAULT_MAX_ACTIVE_ITEMS)
+        snapshot["focus"] = _checkbox(props, "Focus")
+        snapshot["min_terminal_value"] = _select(props, "Min Terminal Value") or DEFAULT_MIN_TERMINAL_VALUE
+        snapshot["fork_budget"] = _number(props, "Fork Budget")
+    except Exception:
+        pass
+
+    cache[project_id] = snapshot
+    return snapshot
+
+
+def _active_project_counts(client: notion_api.NotionAPIClient) -> Counter[str]:
+    cfg = get_config()
+    pages = client.query_all(
+        cfg.work_items_db_id,
+        filter_payload={"property": "Dispatch Requested Consumed At", "date": {"is_not_empty": True}},
+    )
+    counts: Counter[str] = Counter()
+    for page in pages:
+        props = page.get("properties", {})
+        if _status(props) in TERMINAL_STATUSES:
+            continue
+        for project_id in _relation_ids(props, "Project"):
+            counts[project_id] += 1
+    return counts
+
+
+def _resolve_queue_state(
+    props: dict[str, Any],
+    *,
+    client: notion_api.NotionAPIClient,
+    active_project_counts: Counter[str],
+    project_cache: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    project_ids = _relation_ids(props, "Project")
+    project_id = project_ids[0] if project_ids else None
+    project = _project_snapshot(project_id, client, project_cache) if project_id else {
+        "id": None,
+        "name": None,
+        "max_active_items": DEFAULT_MAX_ACTIVE_ITEMS,
+    }
+    retry_count = _int_value(_number(props, "Retry Count"), DEFAULT_RETRY_COUNT)
+    escalation_level = _select(props, "Escalation Level") or DEFAULT_ESCALATION_LEVEL
+    blocked_reason = _text(props, "Blocked Reason") or None
+    project_active_count = active_project_counts.get(project_id, 0) if project_id else 0
+    derived_block_reason = blocked_reason
+    if not derived_block_reason and escalation_level in BLOCKING_ESCALATION_LEVELS:
+        derived_block_reason = f"Escalated for human review ({escalation_level})"
+    if not derived_block_reason and project_id and project_active_count >= project["max_active_items"]:
+        project_label = project["name"] or project_id
+        derived_block_reason = (
+            f"Project WIP cap reached for {project_label} "
+            f"({project_active_count}/{project['max_active_items']})"
+        )
+
+    return {
+        "project_id": project_id,
+        "project_name": project["name"],
+        "project_max_active_items": project["max_active_items"],
+        "project_active_count": project_active_count,
+        "retry_count": retry_count,
+        "escalation_level": escalation_level,
+        "blocked_reason": blocked_reason,
+        "derived_block_reason": derived_block_reason,
+        "execution_budget": _number(props, "Execution Budget"),
+        "concurrency_group": _text(props, "Concurrency Group") or None,
+        "project_focus": bool(project.get("focus")),
+        "project_min_terminal_value": project.get("min_terminal_value") or DEFAULT_MIN_TERMINAL_VALUE,
+        "project_fork_budget": project.get("fork_budget"),
+    }
+
+
+def _ready_dispatch_candidates(client: notion_api.NotionAPIClient) -> tuple[list[dict[str, Any]], bool]:
+    cfg = get_config()
+    filter_payload = {
+        "and": [
+            {"property": "Dispatch Requested Received At", "date": {"is_not_empty": True}},
+            {"property": "Dispatch Requested Consumed At", "date": {"is_empty": True}},
+            {
+                "or": [
+                    {"property": "Status", "status": {"equals": "Not Started"}},
+                    {"property": "Status", "status": {"equals": "Prompt Requested"}},
+                ]
+            },
+        ]
+    }
+
+    pages = client.query_all(cfg.work_items_db_id, filter_payload=filter_payload)
+    active_project_counts = _active_project_counts(client)
+    project_cache: dict[str, dict[str, Any]] = {}
+    candidates: list[dict[str, Any]] = []
+    for page in pages:
+        props = page.get("properties", {})
+        queue_state = _resolve_queue_state(
+            props,
+            client=client,
+            active_project_counts=active_project_counts,
+            project_cache=project_cache,
+        )
+        if queue_state["derived_block_reason"]:
+            continue
+
+        candidates.append({
+            "id": page["id"],
+            "name": _title(props, "Item Name"),
+            "dispatch_via": _select(props, "Dispatch Via"),
+            "execution_lane": _select(props, "Execution Lane"),
+            "environment": _select(props, "Environment"),
+            "branch": _text(props, "Branch"),
+            "project_name": queue_state["project_name"],
+            "project_id": queue_state["project_id"],
+            "project_active_count": queue_state["project_active_count"],
+            "project_max_active_items": queue_state["project_max_active_items"],
+            "project_focus": queue_state["project_focus"],
+            "project_min_terminal_value": queue_state["project_min_terminal_value"],
+            "project_fork_budget": queue_state["project_fork_budget"],
+            "status": _status(props),
+            "type": _select(props, "Type"),
+            "retry_count": queue_state["retry_count"],
+            "execution_budget": queue_state["execution_budget"],
+            "concurrency_group": queue_state["concurrency_group"],
+            "escalation_level": queue_state["escalation_level"],
+            "dispatch_requested_received_at": _date_start(props, "Dispatch Requested Received At"),
+        })
+
+    candidates.sort(
+        key=lambda item: (
+            item.get("dispatch_requested_received_at") or "",
+            item.get("retry_count", DEFAULT_RETRY_COUNT),
+            item.get("name") or "",
+            item.get("id") or "",
+        )
+    )
+    focus_active = any(item.get("project_focus") for item in candidates)
+    return candidates, focus_active
 
 
 # ── Lab Control queries ──────────────────────────────────────────────────────
@@ -193,48 +371,10 @@ def get_dispatchable_items(client: notion_api.NotionAPIClient | None = None) -> 
     if client is None:
         client = notion_api.NotionAPIClient(get_config().notion_token)
 
-    cfg = get_config()
-    filter_payload = {
-        "and": [
-            {"property": "Dispatch Requested Received At", "date": {"is_not_empty": True}},
-            {"property": "Dispatch Requested Consumed At", "date": {"is_empty": True}},
-            {
-                "or": [
-                    {"property": "Status", "status": {"equals": "Not Started"}},
-                    {"property": "Status", "status": {"equals": "Prompt Requested"}},
-                ]
-            },
-        ]
-    }
-
-    pages = client.query_all(cfg.work_items_db_id, filter_payload=filter_payload)
-    results = []
-    for page in pages:
-        props = page.get("properties", {})
-        # Resolve project name if linked
-        project_ids = _relation_ids(props, "Project")
-        project_name = None
-        if project_ids:
-            try:
-                proj_page = client.retrieve_page(project_ids[0])
-                proj_props = proj_page.get("properties", {})
-                project_name = _title(proj_props, "Project Name")
-            except Exception:
-                pass
-
-        results.append({
-            "id": page["id"],
-            "name": _title(props, "Item Name"),
-            "dispatch_via": _select(props, "Dispatch Via"),
-            "execution_lane": _select(props, "Execution Lane"),
-            "environment": _select(props, "Environment"),
-            "branch": _text(props, "Branch"),
-            "project_name": project_name,
-            "status": _status(props),
-            "type": _select(props, "Type"),
-        })
-
-    return results
+    candidates, focus_active = _ready_dispatch_candidates(client)
+    if not focus_active:
+        return candidates
+    return [item for item in candidates if item.get("project_focus")]
 
 
 def build_dispatch_packet(
@@ -266,19 +406,16 @@ def build_dispatch_packet(
     github_issue_url = _url(props, "GitHub Issue URL")
     consumed_at = _date_start(props, "Dispatch Requested Consumed At")
     existing_run_id = _text(props, "run_id") if "run_id" in props else None
-
-    # Resolve project
-    project_ids = _relation_ids(props, "Project")
-    project_name = None
-    project_id = None
-    if project_ids:
-        project_id = project_ids[0]
-        try:
-            proj_page = client.retrieve_page(project_id)
-            proj_props = proj_page.get("properties", {})
-            project_name = _title(proj_props, "Project Name")
-        except Exception:
-            pass
+    active_project_counts = _active_project_counts(client)
+    project_cache: dict[str, dict[str, Any]] = {}
+    queue_state = _resolve_queue_state(
+        props,
+        client=client,
+        active_project_counts=active_project_counts,
+        project_cache=project_cache,
+    )
+    project_name = queue_state["project_name"]
+    project_id = queue_state["project_id"]
 
     # Default execution lane from dispatch_via if not explicitly set
     if not execution_lane and dispatch_via:
@@ -361,6 +498,31 @@ def build_dispatch_packet(
     if consumed_at:
         errors.append(f"V10: Dispatch Requested Consumed At is already set ({consumed_at})")
 
+    if queue_state["blocked_reason"]:
+        errors.append(f"V15: Blocked Reason is set ({queue_state['blocked_reason']})")
+
+    if queue_state["escalation_level"] in BLOCKING_ESCALATION_LEVELS:
+        errors.append(f"V16: escalation_level '{queue_state['escalation_level']}' requires human review")
+
+    if project_id and queue_state["project_active_count"] >= queue_state["project_max_active_items"]:
+        errors.append(
+            "V17: project active item cap reached "
+            f"({queue_state['project_active_count']}/{queue_state['project_max_active_items']})"
+        )
+
+    _, focus_active = _ready_dispatch_candidates(client)
+    if focus_active and not queue_state["project_focus"]:
+        errors.append("V18: project is outside the current focus candidate set")
+
+    if errors and queue_state["derived_block_reason"] and queue_state["blocked_reason"] != queue_state["derived_block_reason"]:
+        try:
+            client.update_page(
+                work_item_id,
+                {"Blocked Reason": _rich_text_property(queue_state["derived_block_reason"])},
+            )
+        except Exception:
+            pass
+
     # V11: production audit logging
     production_audit = False
     if environment == "production":
@@ -396,6 +558,14 @@ def build_dispatch_packet(
         "prompt_notes": prompt_notes,
         "github_issue_url": github_issue_url,
         "cascade_depth": cascade_depth,
+        "concurrency_group": queue_state["concurrency_group"],
+        "execution_budget": queue_state["execution_budget"],
+        "retry_count": queue_state["retry_count"],
+        "escalation_level": queue_state["escalation_level"],
+        "project_focus": queue_state["project_focus"],
+        "project_min_terminal_value": queue_state["project_min_terminal_value"],
+        "project_fork_budget": queue_state["project_fork_budget"],
+        "portfolio_focus_active": focus_active,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "constraints": {
             "can_code": lane_caps.get("can_code", False),
@@ -429,6 +599,7 @@ def stamp_dispatch_consumed(
         "Dispatch Requested Consumed At": {"date": {"start": now}},
         "Status": {"status": {"name": "In Progress"}},
         "run_id": {"rich_text": [{"type": "text", "text": {"content": run_id}}]},
+        "Blocked Reason": {"rich_text": []},
     }
 
     result = client.update_page(work_item_id, properties)
@@ -621,6 +792,10 @@ def handle_final_return(
         # Error/gated/timeout: set Blocked but still record Return Received At
         # so Intake Clerk trigger fires for triage
         update_props["Status"] = {"status": {"name": mapping.get("status", "Blocked")}}
+        retry_count = _int_value(_number(props, "Retry Count"), DEFAULT_RETRY_COUNT) + 1
+        update_props["Retry Count"] = {"number": retry_count}
+        if retry_count > RETRY_ESCALATION_THRESHOLD:
+            update_props["Escalation Level"] = {"select": {"name": "Needs Sam"}}
 
     client.update_page(work_item_id, update_props)
 

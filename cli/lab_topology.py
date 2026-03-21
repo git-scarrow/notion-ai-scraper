@@ -33,6 +33,7 @@ AGENTS_YAML = os.path.join(ROOT, "agents.yaml")
 CONTRACTS_YAML = os.path.join(ROOT, "contracts", "lab_contracts.yaml")
 DEFAULT_LOOKBACK_DAYS = 14
 DEFAULT_LOOKBACK_LIMIT = 25
+TERMINAL_STATUSES = {"Done", "Passed", "Kill Condition Met", "Inconclusive", "Closed", "Blocked"}
 
 _ACCESS_STRENGTH = {
     "reader": 1,
@@ -49,6 +50,7 @@ _TIMELINE_FIELDS = [
     "Librarian Request Received At",
     "Librarian Request Consumed At",
     "Synthesis Completed At",
+    "Synthesis Consumed At",
     "FOSS Recon Consumed At",
     "Triage Routed At",
 ]
@@ -75,6 +77,24 @@ def _parse_iso(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _contract_rollout_applies(contract: dict[str, Any], item: dict[str, Any]) -> bool:
+    rollout_started_at = _parse_iso(contract.get("rollout_started_at"))
+    if rollout_started_at is None:
+        return True
+    candidate_times: list[datetime] = []
+    for field in contract.get("upstream_complete_fields", []) or []:
+        parsed = _parse_iso(item.get(field))
+        if parsed is not None:
+            candidate_times.append(parsed)
+    if not candidate_times:
+        parsed = _parse_iso(item.get("_last_edited_time")) or _parse_iso(item.get("_created_time"))
+        if parsed is not None:
+            candidate_times.append(parsed)
+    if not candidate_times:
+        return False
+    return max(candidate_times) >= rollout_started_at
 
 
 def _load_registry(path: str = AGENTS_YAML) -> dict[str, dict[str, Any]]:
@@ -130,6 +150,33 @@ def _extract_block_title(block: dict[str, Any]) -> str:
         if isinstance(item, list) and item:
             parts.append(str(item[0]))
     return "".join(parts).strip()
+
+
+def _load_project_policies(project_database_id: str | None) -> dict[str, dict[str, Any]]:
+    if not project_database_id:
+        return {}
+    cfg = get_config()
+    token = getattr(cfg, "notion_token", None)
+    if not token:
+        return {}
+    client = notion_api.NotionAPIClient(token)
+    try:
+        pages = client.query_all(project_database_id)
+    except Exception:
+        return {}
+
+    policies: dict[str, dict[str, Any]] = {}
+    for page in pages:
+        props = page.get("properties", {}) or {}
+        policies[page["id"]] = {
+            "id": page["id"],
+            "name": "".join(item.get("plain_text", "") for item in (props.get("Project Name", {}) or {}).get("title", [])) or page["id"],
+            "focus": bool((props.get("Focus", {}) or {}).get("checkbox")),
+            "max_active_items": (props.get("Max Active Items", {}) or {}).get("number"),
+            "min_terminal_value": ((props.get("Min Terminal Value", {}) or {}).get("select") or {}).get("name"),
+            "fork_budget": (props.get("Fork Budget", {}) or {}).get("number"),
+        }
+    return policies
 
 
 def _collection_schema_summary(collection: dict[str, Any]) -> dict[str, Any]:
@@ -806,6 +853,9 @@ def compile_snapshot(
         "database_by_public_id": database_by_public,
         "database_by_internal_id": databases_by_internal,
     }
+    project_db = snapshot_indexes["database_by_key"].get("lab_projects", {})
+    project_policies = _load_project_policies(project_db.get("notion_public_id"))
+    snapshot_indexes["project_policy_by_id"] = project_policies
     resolved_contracts = _resolve_contracts(contracts, snapshot_indexes)
     edges = _compile_edges(agents, automations, resolved_contracts)
 
@@ -816,6 +866,7 @@ def compile_snapshot(
         "agents": sorted(agents, key=lambda item: item["label"].lower()),
         "automations": automations,
         "automation_errors": automation_errors,
+        "project_policies": sorted(project_policies.values(), key=lambda item: item["name"].lower()),
         "contracts": resolved_contracts,
         "edges": edges,
         "indexes": snapshot_indexes,
@@ -940,6 +991,13 @@ def _published_artifact_drift_details(agent: dict[str, Any]) -> list[str]:
     if published_instruction_hash and draft_instruction_hash != published_instruction_hash:
         details.append("draft instruction content differs from the published artifact snapshot")
     return details
+
+
+def _first_relation_id(item: dict[str, Any], field: str) -> str | None:
+    values = item.get(field) or []
+    if isinstance(values, list) and values:
+        return values[0]
+    return None
 
 
 def _summarize_public_page(page: dict[str, Any]) -> dict[str, Any]:
@@ -1112,6 +1170,8 @@ def evaluate_drift(
         return {"findings": findings, "metadata": metadata}
 
     recent_summaries = [_summarize_public_page(page) for page in recent_work_items]
+    recent_by_id = {item["id"]: item for item in recent_summaries}
+    project_policy_by_id = snapshot["indexes"].get("project_policy_by_id", {})
     metadata["t7_evaluated"] = True
     metadata["recent_items_seen"] = len(recent_summaries)
     for contract in snapshot["contracts"]:
@@ -1138,6 +1198,8 @@ def evaluate_drift(
                 continue
             if any(not item.get(field) for field in contract.get("upstream_complete_fields", [])):
                 continue
+            if not _contract_rollout_applies(contract, item):
+                continue
             matches.append(item)
 
         if not matches:
@@ -1147,6 +1209,61 @@ def evaluate_drift(
             if missing:
                 subject = item.get("Item Name") or item["id"]
                 _add_finding(findings, "T.7", "MUST-FIX", subject, f"{contract['name']} missing downstream artifacts: {', '.join(missing)}")
+
+    fork_counts_by_project: dict[str, int] = {}
+    over_budget_projects: set[str] = set()
+    for item in recent_summaries:
+        if item.get("Disposition") != "Fork" or not item.get("Synthesis Consumed At"):
+            continue
+        project_id = _first_relation_id(item, "Project")
+        if not project_id:
+            continue
+        fork_counts_by_project[project_id] = fork_counts_by_project.get(project_id, 0) + 1
+
+    for item in recent_summaries:
+        if not item.get("Synthesis Consumed At"):
+            continue
+        subject = item.get("Item Name") or item["id"]
+        disposition = item.get("Disposition")
+        has_successor = bool(item.get("Superseded By"))
+        routing_signal = item.get("Routing Signal")
+        if not (has_successor or routing_signal):
+            continue
+
+        if not disposition:
+            _add_finding(findings, "T.9", "MUST-FIX", subject, "synthesis was consumed and successor/routing state exists, but Disposition is empty")
+            continue
+
+        if disposition in {"Repeat", "Fork"} and not has_successor:
+            _add_finding(findings, "T.9", "MUST-FIX", subject, f"Disposition '{disposition}' requires Superseded By")
+        elif disposition == "Advance" and not has_successor and routing_signal != "ADVANCE":
+            _add_finding(findings, "T.9", "MUST-FIX", subject, "Disposition 'Advance' requires Superseded By or Routing Signal = ADVANCE")
+
+        if disposition in {"Archive", "Escalate to Sam"} and has_successor:
+            _add_finding(findings, "T.9", "MUST-FIX", subject, f"Disposition '{disposition}' forbids Superseded By")
+
+        if disposition == "Repeat" and has_successor:
+            successor_ids = item.get("Superseded By") or []
+            known_successors = [recent_by_id[successor_id] for successor_id in successor_ids if successor_id in recent_by_id]
+            if known_successors:
+                successor_types = {successor.get("Type") for successor in known_successors}
+                if item.get("Type") not in successor_types:
+                    _add_finding(findings, "T.9", "MUST-FIX", subject, "Disposition 'Repeat' points to a successor with a different Type")
+
+        if disposition == "Fork":
+            project_id = _first_relation_id(item, "Project")
+            policy = project_policy_by_id.get(project_id or "")
+            budget = policy.get("fork_budget") if policy else None
+            if budget is not None and project_id not in over_budget_projects and fork_counts_by_project.get(project_id or "", 0) > int(budget):
+                over_budget_projects.add(project_id or "")
+                project_name = (policy or {}).get("name") or project_id or "unknown project"
+                _add_finding(
+                    findings,
+                    "T.10",
+                    "MUST-FIX",
+                    project_name,
+                    f"fork budget exceeded in lookback window ({fork_counts_by_project.get(project_id or '', 0)}/{int(budget)})",
+                )
 
     return {"findings": findings, "metadata": metadata}
 
@@ -1212,6 +1329,15 @@ def trace_work_item(page_id: str, snapshot: dict[str, Any] | None = None) -> str
     for field in _TIMELINE_FIELDS:
         if summary.get(field):
             lines.append(f"- {field}: {summary[field]}")
+    decision_fields = ("Disposition", "Routing Signal", "Routing Target")
+    decision_lines = [f"- {field}: {summary[field]}" for field in decision_fields if summary.get(field)]
+    successor_ids = summary.get("Superseded By") or []
+    if successor_ids:
+        decision_lines.append(f"- Superseded By: {', '.join(successor_ids)}")
+    if decision_lines:
+        lines.append("")
+        lines.append("Decision state:")
+        lines.extend(decision_lines)
 
     matched_contracts: list[dict[str, Any]] = []
     missing_artifacts: list[str] = []
@@ -1226,6 +1352,8 @@ def trace_work_item(page_id: str, snapshot: dict[str, Any] | None = None) -> str
         if not selector_ok:
             continue
         if any(not summary.get(field) for field in contract.get("upstream_complete_fields", [])):
+            continue
+        if not _contract_rollout_applies(contract, summary):
             continue
         matched_contracts.append(contract)
         for artifact in contract.get("required_artifacts", []):

@@ -109,7 +109,7 @@ def _resolve_space_id(token: str, user_id: str | None) -> str:
 
 
 TEMPLATE_DATA_JSON = os.path.expanduser(
-    "~/dev/projects/agent-env/dev/.agents/template-data.json"
+    "~/projects/agent-env/home/.agents/template-data.json"
 )
 
 

@@ -29,6 +29,7 @@ import notion_api
 
 WORK_ITEMS_DB = "e2e-work-items-db"
 AUDIT_LOG_DB = "e2e-audit-log-db"
+PROJECTS_DB = "e2e-projects-db"
 
 
 def _mock_config():
@@ -153,6 +154,12 @@ def _make_work_item(
     status: str = "Not Started",
     dispatch_received: str | None = "2026-03-10T00:00:00Z",
     dispatch_consumed: str | None = None,
+    retry_count: int | None = None,
+    blocked_reason: str = "",
+    escalation_level: str | None = None,
+    execution_budget: int | float | None = None,
+    concurrency_group: str = "",
+    project_ids: list[str] | None = None,
 ) -> tuple[str, dict]:
     """Build a dispatchable work item page dict."""
     page_id = page_id or str(uuid.uuid4())
@@ -184,13 +191,47 @@ def _make_work_item(
         "Prompt Notes": {"type": "rich_text", "rich_text": []},
         "Outcome": {"type": "rich_text", "rich_text": []},
         "Verdict": {"type": "select", "select": None},
+        "Retry Count": {"type": "number", "number": retry_count},
+        "Blocked Reason": {"type": "rich_text", "rich_text": [{"plain_text": blocked_reason}]} if blocked_reason else {"type": "rich_text", "rich_text": []},
+        "Escalation Level": {"type": "select", "select": {"name": escalation_level} if escalation_level else None},
+        "Execution Budget": {"type": "number", "number": execution_budget},
+        "Concurrency Group": {"type": "rich_text", "rich_text": [{"plain_text": concurrency_group}]} if concurrency_group else {"type": "rich_text", "rich_text": []},
+        "Synthesis Consumed At": {"type": "date", "date": None},
     }
+    if project_ids:
+        props["Project"] = {"type": "relation", "relation": [{"id": project_id} for project_id in project_ids]}
 
     page = {
         "id": page_id,
         "created_time": "2026-03-10T00:00:00.000Z",
         "last_edited_time": now_str,
         "properties": props,
+    }
+    return page_id, page
+
+
+def _make_project(
+    page_id: str | None = None,
+    *,
+    name: str = "Test Project",
+    focus: bool = False,
+    max_active_items: int | None = None,
+    min_terminal_value: str | None = None,
+    fork_budget: int | float | None = None,
+) -> tuple[str, dict]:
+    page_id = page_id or str(uuid.uuid4())
+    now_str = datetime.now(timezone.utc).isoformat()
+    page = {
+        "id": page_id,
+        "created_time": now_str,
+        "last_edited_time": now_str,
+        "properties": {
+            "Project Name": {"type": "title", "title": [{"plain_text": name}]},
+            "Focus": {"type": "checkbox", "checkbox": focus},
+            "Max Active Items": {"type": "number", "number": max_active_items},
+            "Min Terminal Value": {"type": "select", "select": {"name": min_terminal_value} if min_terminal_value else None},
+            "Fork Budget": {"type": "number", "number": fork_budget},
+        },
     }
     return page_id, page
 
@@ -366,6 +407,16 @@ class TestOpenClawE2E:
         assert _extract_status(mock.pages[page_id]) == "Blocked"
         assert _extract_select(mock.pages[page_id], "Verdict") is None
         assert len(mock.audit_log) == 2
+        assert mock.pages[page_id]["properties"]["Retry Count"]["number"] == 1
+
+    def test_third_failed_return_escalates_to_needs_sam(self):
+        page_id, page = _make_work_item(item_type="Gauntlet", retry_count=2)
+        mock = _fresh_mock(page_id, page)
+        r = _run_full_loop(mock, page_id, status="error", error="Execution failed")
+
+        assert r["return_result"]["ingested"] is True
+        assert mock.pages[page_id]["properties"]["Retry Count"]["number"] == 3
+        assert _extract_select(mock.pages[page_id], "Escalation Level") == "Needs Sam"
 
     def test_timeout_return(self):
         page_id, page = _make_work_item(item_type="Gauntlet")
@@ -397,6 +448,40 @@ class TestOpenClawE2E:
         )
         assert second["ingested"] is False
         assert second.get("reason") == "duplicate_run_id"
+
+    def test_stamp_dispatch_consumed_clears_blocked_reason(self):
+        page_id, page = _make_work_item(blocked_reason="Capped")
+        mock = _fresh_mock(page_id, page)
+        packet = dispatch.build_dispatch_packet(page_id, mock)
+        assert packet["packet"] is None
+
+        mock.pages[page_id]["properties"]["Blocked Reason"] = {"type": "rich_text", "rich_text": []}
+        packet = dispatch.build_dispatch_packet(page_id, mock)
+        dispatch.stamp_dispatch_consumed(page_id, packet["packet"]["run_id"], mock)
+
+        assert mock.pages[page_id]["properties"]["Blocked Reason"]["rich_text"] == []
+
+    def test_focus_projects_define_portfolio_candidate_set(self):
+        focused_project_id, focused_project = _make_project(name="Focused", focus=True)
+        held_project_id, held_project = _make_project(name="Held", focus=False)
+        held_item_id, held_item = _make_work_item(name="HELD-1", project_ids=[held_project_id])
+        focus_item_id, focus_item = _make_work_item(name="FOCUS-1", project_ids=[focused_project_id])
+
+        mock = NotionStateMock()
+        mock.add_page(focused_project_id, focused_project, PROJECTS_DB)
+        mock.add_page(held_project_id, held_project, PROJECTS_DB)
+        mock.add_page(held_item_id, held_item, WORK_ITEMS_DB)
+        mock.add_page(focus_item_id, focus_item, WORK_ITEMS_DB)
+
+        items = dispatch.get_dispatchable_items(mock)
+        assert [item["name"] for item in items] == ["FOCUS-1"]
+
+        held_result = dispatch.build_dispatch_packet(held_item_id, mock)
+        assert any("V18" in error for error in held_result["errors"])
+
+        focus_result = dispatch.build_dispatch_packet(focus_item_id, mock)
+        assert focus_result["errors"] == []
+        assert focus_result["packet"]["project_focus"] is True
 
 
 # ── Auditor-after-loop tests ────────────────────────────────────────────────

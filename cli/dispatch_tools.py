@@ -50,8 +50,8 @@ def register(mcp, cfg):
             return "No dispatchable items found."
 
         lines = [f"**{len(items)} dispatchable item(s):**\n"]
-        lines.append("| Item Name | Dispatch Via | Lane | Environment | Branch | Project | Type |")
-        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        lines.append("| Item Name | Dispatch Via | Lane | Environment | Branch | Project | Focus | Retry | Type |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for item in items:
             lines.append(
                 f"| [{item['name']}](https://www.notion.so/{item['id'].replace('-', '')}) "
@@ -60,6 +60,8 @@ def register(mcp, cfg):
                 f"| {item.get('environment') or '—'} "
                 f"| {item.get('branch') or '—'} "
                 f"| {item.get('project_name') or '—'} "
+                f"| {'Yes' if item.get('project_focus') else '—'} "
+                f"| {item.get('retry_count', 0)} "
                 f"| {item.get('type') or '—'} |"
             )
 

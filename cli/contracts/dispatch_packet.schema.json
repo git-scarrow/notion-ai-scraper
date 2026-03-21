@@ -38,11 +38,27 @@
     "branch":          {"type": ["string", "null"]},
     "type": {
       "type": "string",
-      "enum": ["Gauntlet", "Measurement Track", "Literature Survey", "Design Spec", "Feasibility Analysis", "Other"]
+      "enum": ["Gauntlet", "Measurement Track", "Literature Survey", "Design Spec", "Feasibility Analysis", "Implementation", "Operational", "Review", "Experiment", "Fact-Check", "Other"]
     },
     "prompt_notes":    {"type": ["string", "null"]},
     "github_issue_url": {"type": ["string", "null"], "format": "uri"},
     "cascade_depth":   {"type": "integer", "minimum": 1, "default": 1},
+    "concurrency_group": {"type": ["string", "null"]},
+    "execution_budget": {"type": ["number", "null"]},
+    "retry_count": {"type": "integer", "minimum": 0, "default": 0},
+    "escalation_level": {
+      "type": "string",
+      "enum": ["Normal", "Needs Sam", "Critical"],
+      "default": "Normal"
+    },
+    "project_focus": {"type": "boolean", "default": false},
+    "project_min_terminal_value": {
+      "type": "string",
+      "enum": ["Any", "Meaningful", "High"],
+      "default": "Any"
+    },
+    "project_fork_budget": {"type": ["number", "null"]},
+    "portfolio_focus_active": {"type": "boolean", "default": false},
     "created_at":      {"type": "string", "format": "date-time"},
     "constraints": {
       "type": "object",

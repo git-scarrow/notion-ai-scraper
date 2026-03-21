@@ -5,7 +5,7 @@ from typing import Any
 
 # Global paths
 TEMPLATE_DATA_JSON = os.path.expanduser(
-    "~/dev/projects/agent-env/dev/.agents/template-data.json"
+    "~/projects/agent-env/home/.agents/template-data.json"
 )
 
 # Default hardcoded values (as fallbacks if template-data.json is missing).

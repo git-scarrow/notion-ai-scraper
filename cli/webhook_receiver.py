@@ -4,33 +4,34 @@ webhook_receiver.py — FastAPI receiver for GitHub and Notion webhooks.
 
 Routes:
   POST /github-return    — GitHub issues/PR closed → update Notion Work Item
-  POST /notion-dispatch  — Notion automation (Dispatch Requested checked) → dispatch to OpenClaw
+  POST /notion-dispatch  — Notion public API webhook → dispatch to OpenClaw via run-lab-dispatch.sh
 
 Installation:
-  pip install fastapi uvicorn httpx
-  (httpx required for outbound OpenClaw call)
+  pip install fastapi uvicorn
 
 Usage:
   uvicorn cli.webhook_receiver:app --host 0.0.0.0 --port 8000
 
 Environment variables:
   GITHUB_WEBHOOK_SECRET   — GitHub webhook HMAC secret
-  NOTION_WEBHOOK_SECRET   — Notion automation webhook HMAC secret
+  NOTION_WEBHOOK_SECRET   — Notion webhook verification_token (from subscription setup)
   NOTION_TOKEN            — Notion integration token (for dispatch.py)
-  OPENCLAW_HOOK_URL       — Full URL of OpenClaw /hooks/agent endpoint
-  OPENCLAW_HOOK_TOKEN     — Bearer token for OpenClaw hook auth (optional)
+  OPENCLAW_SSH_HOST       — SSH host for OpenClaw (default: nix)
+  OPENCLAW_DISPATCH_CMD   — Command to run on the SSH host (default: see below)
 """
 
 import os
 import hmac
 import hashlib
 import json
+import subprocess
 import uuid
 import logging
 from fastapi import FastAPI, Request, HTTPException, Header
-from . import github_return
-from . import notion_api
-from . import dispatch
+try:
+    from . import github_return, notion_api, dispatch
+except ImportError:
+    import github_return, notion_api, dispatch
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,11 @@ app = FastAPI()
 
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
 NOTION_WEBHOOK_SECRET = os.environ.get("NOTION_WEBHOOK_SECRET")
-OPENCLAW_HOOK_URL = os.environ.get("OPENCLAW_HOOK_URL")
-OPENCLAW_HOOK_TOKEN = os.environ.get("OPENCLAW_HOOK_TOKEN")
+OPENCLAW_SSH_HOST = os.environ.get("OPENCLAW_SSH_HOST", "nix")
+OPENCLAW_DISPATCH_CMD = os.environ.get(
+    "OPENCLAW_DISPATCH_CMD",
+    "sudo docker exec -i openclaw /home/node/nix-docker-configs/openclaw/run-lab-dispatch.sh --inside",
+)
 
 
 def _verify_hmac(payload: bytes, signature: str | None, secret: str | None) -> bool:
@@ -194,86 +198,112 @@ def process_return(url: str, summary: str):
 
 # ── Notion dispatch webhook ──────────────────────────────────────────────────
 
+
+def _dispatch_to_openclaw(packet: dict) -> str:
+    """Pipe a dispatch packet to run-lab-dispatch.sh via SSH.
+
+    Returns a status string. Runs asynchronously (fire-and-forget) so the
+    webhook response isn't blocked by the full execution.
+    """
+    packet_json = json.dumps(packet)
+    cmd = f"ssh {OPENCLAW_SSH_HOST} {OPENCLAW_DISPATCH_CMD}"
+    try:
+        proc = subprocess.Popen(
+            cmd, shell=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.stdin.write(packet_json.encode())
+        proc.stdin.close()
+        # Don't wait — execution can take 10+ minutes
+        logger.info("Spawned run-lab-dispatch.sh (pid=%s) for %s", proc.pid, packet.get("work_item_name"))
+        return f"spawned (pid={proc.pid})"
+    except Exception as e:
+        logger.error("Failed to spawn run-lab-dispatch.sh: %s", e)
+        return f"error: {e}"
+
+
 @app.post("/notion-dispatch")
 async def notion_dispatch_webhook(
     request: Request,
     x_notion_signature: str = Header(None),
 ):
-    """Receive Notion automation webhook when 'Dispatch Requested' is checked.
+    """Receive Notion public API webhook events for the Work Items database.
 
-    Expected automation body template (configure in Notion UI):
-        {"page_id": "{{page.id}}"}
+    Handles two flows:
+    1. Subscription verification: Notion POSTs {"verification_token": "..."}
+       during setup. Log the token — paste it into the Notion UI to activate.
+    2. page.properties_updated events: build dispatch packet, stamp consumed,
+       pipe to run-lab-dispatch.sh on OpenClaw.
 
-    On success: builds+validates dispatch packet, stamps consumed, forwards to OpenClaw.
-    Returns 200 even on validation failure so Notion does not retry a bad Work Item.
+    Returns 200 on validation failures so Notion does not retry bad items.
     """
     payload_bytes = await request.body()
-
-    if not _verify_hmac(payload_bytes, x_notion_signature, NOTION_WEBHOOK_SECRET):
-        raise HTTPException(status_code=401, detail="Invalid Notion signature")
 
     try:
         payload = json.loads(payload_bytes)
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Accept {"page_id": "..."} (configured template) or raw Notion event format
-    raw_id = payload.get("page_id") or (payload.get("entity") or {}).get("id")
-    if not raw_id:
-        return {"status": "ignored", "reason": "no_page_id"}
+    # ── Step 1: Subscription verification ────────────────────────────────
+    if "verification_token" in payload and "type" not in payload:
+        token = payload["verification_token"]
+        logger.info("Notion webhook verification token received: %s", token)
+        # Print to stdout so it's visible in service logs
+        print(f"\n{'='*60}")
+        print(f"NOTION WEBHOOK VERIFICATION TOKEN: {token}")
+        print(f"Paste this into the Notion integration Webhooks tab.")
+        print(f"{'='*60}\n")
+        return {"status": "verification_received"}
 
-    # Normalize to hyphenated UUID
+    # ── Step 2: Verify signature on real events ──────────────────────────
+    if not _verify_hmac(payload_bytes, x_notion_signature, NOTION_WEBHOOK_SECRET):
+        raise HTTPException(status_code=401, detail="Invalid Notion signature")
+
+    # ── Step 3: Filter event type ────────────────────────────────────────
+    event_type = payload.get("type", "")
+    if event_type != "page.properties_updated":
+        return {"status": "ignored", "reason": f"event_type={event_type}"}
+
+    # ── Step 4: Extract page ID ──────────────────────────────────────────
+    raw_id = (payload.get("entity") or {}).get("id")
+    if not raw_id:
+        return {"status": "ignored", "reason": "no_entity_id"}
+
     try:
         page_id = str(uuid.UUID(str(raw_id).replace("-", "")))
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid page_id: {raw_id!r}")
+        raise HTTPException(status_code=400, detail=f"Invalid entity id: {raw_id!r}")
 
-    # Build and validate dispatch packet (V1-V12)
+    # ── Step 5: Build and validate dispatch packet ───────────────────────
     try:
         result = dispatch.build_dispatch_packet(page_id)
     except Exception as e:
         logger.error("build_dispatch_packet(%s) failed: %s", page_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        # Return 200 — this page may not be a dispatchable Work Item
+        return {"status": "not_dispatchable", "page_id": page_id, "error": str(e)}
 
     if result["errors"]:
-        # Return 200 — Notion must not retry a Work Item that fails validation
-        logger.warning("Dispatch validation failed for %s: %s", page_id, result["errors"])
+        logger.info("Dispatch validation failed for %s: %s", page_id, result["errors"])
         return {"status": "validation_failed", "page_id": page_id, "errors": result["errors"]}
 
     packet = result["packet"]
     run_id = packet["run_id"]
 
-    # Stamp consumed: set In Progress + run_id + consumed_at
+    # ── Step 6: Stamp consumed (with race guard) ─────────────────────────
     try:
-        dispatch.stamp_dispatch_consumed(page_id, run_id)
+        stamp_result = dispatch.stamp_dispatch_consumed(page_id, run_id)
     except Exception as e:
         logger.error("stamp_dispatch_consumed(%s, %s) failed: %s", page_id, run_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "stamp_failed", "page_id": page_id, "error": str(e)}
 
-    # Forward packet to OpenClaw to spawn the lane agent
-    openclaw_result: str | int = "skipped (OPENCLAW_HOOK_URL not configured)"
-    if OPENCLAW_HOOK_URL:
-        try:
-            import httpx
-            headers = {"Content-Type": "application/json"}
-            if OPENCLAW_HOOK_TOKEN:
-                headers["Authorization"] = f"Bearer {OPENCLAW_HOOK_TOKEN}"
-            resp = httpx.post(
-                OPENCLAW_HOOK_URL,
-                json={"packet": packet},
-                headers=headers,
-                timeout=10.0,
-            )
-            openclaw_result = resp.status_code
-            if resp.status_code >= 400:
-                logger.warning(
-                    "OpenClaw hook returned %s for run_id=%s: %s",
-                    resp.status_code, run_id, resp.text[:500],
-                )
-        except Exception as e:
-            # Stamp already written — log and return degraded success rather than 500
-            logger.error("OpenClaw hook call failed for run_id=%s: %s", run_id, e)
-            openclaw_result = f"error: {e}"
+    if stamp_result.get("status") in ("already_consumed", "wrong_status"):
+        logger.info("Skipping %s: %s", page_id, stamp_result)
+        return {"status": "skipped", "page_id": page_id, "reason": stamp_result}
+
+    # ── Step 7: Dispatch to OpenClaw ─────────────────────────────────────
+    openclaw_result = _dispatch_to_openclaw(packet)
 
     logger.info(
         "Dispatched %s (run_id=%s, lane=%s, openclaw=%s)",

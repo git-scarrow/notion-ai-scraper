@@ -199,14 +199,41 @@ def process_return(url: str, summary: str):
 # ── Notion dispatch webhook ──────────────────────────────────────────────────
 
 
-def _dispatch_to_openclaw(packet: dict) -> str:
-    """Pipe a dispatch packet to run-lab-dispatch.sh via SSH.
+LOCAL_DISPATCH_CMD = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "run-lab-dispatch-local.sh"
+)
 
-    Returns a status string. Runs asynchronously (fire-and-forget) so the
-    webhook response isn't blocked by the full execution.
+
+def _nix_reachable() -> bool:
+    """Quick check if nix is reachable via SSH (2s timeout)."""
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=2", OPENCLAW_SSH_HOST, "true"],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _dispatch_to_openclaw(packet: dict) -> str:
+    """Dispatch a packet to the execution plane.
+
+    Primary: pipe to run-lab-dispatch.sh on nix via SSH.
+    Fallback: run-lab-dispatch-local.sh on gentoo via claude CLI.
+
+    Returns a status string. Runs fire-and-forget.
     """
     packet_json = json.dumps(packet)
-    cmd = f"ssh {OPENCLAW_SSH_HOST} {OPENCLAW_DISPATCH_CMD}"
+
+    if _nix_reachable():
+        cmd = f"ssh {OPENCLAW_SSH_HOST} {OPENCLAW_DISPATCH_CMD}"
+        label = "nix/openclaw"
+    else:
+        cmd = LOCAL_DISPATCH_CMD
+        label = "gentoo/local"
+        logger.warning("nix unreachable — falling back to local dispatch for %s", packet.get("work_item_name"))
+
     try:
         proc = subprocess.Popen(
             cmd, shell=True,
@@ -216,11 +243,10 @@ def _dispatch_to_openclaw(packet: dict) -> str:
         )
         proc.stdin.write(packet_json.encode())
         proc.stdin.close()
-        # Don't wait — execution can take 10+ minutes
-        logger.info("Spawned run-lab-dispatch.sh (pid=%s) for %s", proc.pid, packet.get("work_item_name"))
-        return f"spawned (pid={proc.pid})"
+        logger.info("Spawned %s (pid=%s) for %s", label, proc.pid, packet.get("work_item_name"))
+        return f"spawned:{label} (pid={proc.pid})"
     except Exception as e:
-        logger.error("Failed to spawn run-lab-dispatch.sh: %s", e)
+        logger.error("Failed to spawn dispatch for %s: %s", packet.get("work_item_name"), e)
         return f"error: {e}"
 
 

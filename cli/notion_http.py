@@ -128,12 +128,18 @@ def _block_pointer(notion_public_id: str, space_id: str) -> dict:
     return {"table": "block", "id": notion_public_id, "spaceId": space_id}
 
 
+MAX_OPS_PER_TX = 200
+
+
 def send_ops(space_id: str, ops: list[dict],
              token_v2: str, user_id: str | None = None,
              dry_run: bool = False,
              user_action: str = "cli.update_agent",
              endpoint: str = "saveTransactionsFanout") -> None:
-    """Send a batch of operations in a single transaction.
+    """Send operations to Notion, batching into multiple transactions if needed.
+
+    Notion's saveTransactionsFanout returns 500 on very large payloads.
+    Operations are split into chunks of MAX_OPS_PER_TX and sent sequentially.
 
     endpoint:
         "saveTransactionsFanout" — distributed write, used for block/content edits.
@@ -143,8 +149,10 @@ def send_ops(space_id: str, ops: list[dict],
     """
     if not ops:
         return
-    _post(endpoint, _tx(space_id, ops, user_action=user_action),
-          token_v2, user_id, dry_run, space_id=space_id)
+    for i in range(0, len(ops), MAX_OPS_PER_TX):
+        chunk = ops[i:i + MAX_OPS_PER_TX]
+        _post(endpoint, _tx(space_id, chunk, user_action=user_action),
+              token_v2, user_id, dry_run, space_id=space_id)
 
 
 def _record_value(entry: dict | None) -> dict:

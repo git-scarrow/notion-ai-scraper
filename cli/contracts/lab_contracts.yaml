@@ -25,13 +25,13 @@ contracts:
     trigger_fields:
       - Lab Dispatch Requested At
     consumed_fields:
-      - Dispatch Requested Consumed At
+      - Prompt Request Received At
     produced_fields:
       - Prompt Notes
       - GitHub Issue URL
       - Prompt Request Received At
     required_artifacts:
-      - Dispatch Requested Consumed At
+      - Prompt Request Received At
     selector: {}
     upstream_complete_fields:
       - Lab Dispatch Requested At

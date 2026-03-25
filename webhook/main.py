@@ -565,7 +565,9 @@ async def openclaw_progress(
 # ──────────────────────────────────────────────────────────
 
 OPENCLAW_GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "http://openclaw:18789")
-OPENCLAW_GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+_GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+# /hooks/agent uses a derived token: sha256("hooks:" + GATEWAY_AUTH_TOKEN)
+OPENCLAW_HOOKS_TOKEN = hashlib.sha256(f"hooks:{_GATEWAY_TOKEN}".encode()).hexdigest() if _GATEWAY_TOKEN else ""
 
 
 def _verify_notion_signature(payload_bytes: bytes, signature: str | None) -> bool:
@@ -589,7 +591,7 @@ def _trigger_dispatch_poller(reason: str):
                 "name": "notion-webhook",
                 "wakeMode": "now",
             },
-            headers={"Content-Type": "application/json", "x-openclaw-token": OPENCLAW_GATEWAY_TOKEN},
+            headers={"Content-Type": "application/json", "x-openclaw-token": OPENCLAW_HOOKS_TOKEN},
             timeout=10,
         )
         logger.info("Triggered dispatch-poller (%s): %s", resp.status_code, reason)

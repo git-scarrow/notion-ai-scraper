@@ -109,15 +109,21 @@ def _get_status_name(work_item: dict) -> str | None:
         return None
 
 def _update_work_item_complete(page_id: str, summary: str, from_status: str | None = None):
-    """Update Work Item status and signal the Intake Clerk."""
+    """Update Work Item status and signal the Librarian directly.
+
+    Bypasses the Intake Clerk — sets Librarian Request Received At alongside
+    Return Received At so the Librarian fires without an intermediate agent hop.
+    """
     update_url = f"https://api.notion.com/v1/pages/{page_id}"
     ts = now_iso()
 
     payload = {
         "properties": {
-            "Status": {"status": {"name": "Awaiting Intake"}},
+            "Status": {"status": {"name": "Done"}},
             "Return Received At": {"date": {"start": ts}},
             "Return Consumed At": {"date": {"start": ts}},
+            "Librarian Request Received At": {"date": {"start": ts}},
+            "Outcome": {"rich_text": [{"text": {"content": summary[:2000]}}]},
         }
     }
     _notion_request("PATCH", update_url, json=payload)
@@ -135,12 +141,12 @@ def _update_work_item_complete(page_id: str, summary: str, from_status: str | No
     # Log to Audit Log
     if AUDIT_LOG_DATABASE_ID:
         try:
-            transition = f"{from_status}→AwaitingIntake" if from_status else "→AwaitingIntake"
+            transition = f"{from_status}→Done" if from_status else "→Done"
             audit_props = {
                 "Transition": {"title": [{"text": {"content": transition}}]},
                 "Work Item": {"relation": [{"id": page_id}]},
                 "Agent": {"select": {"name": "Webhook Bridge"}},
-                "To Status": {"select": {"name": "Awaiting Intake"}},
+                "To Status": {"select": {"name": "Done"}},
                 "Consumption Timestamp": {"date": {"start": ts}},
             }
             if from_status:

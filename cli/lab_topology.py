@@ -1165,6 +1165,70 @@ def evaluate_drift(
         if automation_writers and contract_writers:
             _add_finding(findings, "T.8", "MUST-FIX", f"{database_key}.{field_name}", f"automation and contract paths overlap without a single authoritative write path: {', '.join(writers)}")
 
+    # T.13: dispatch_packet.schema.json enum arrays vs dispatch_policy sets
+    contracts_dir = os.path.join(ROOT, "contracts")
+    try:
+        with open(os.path.join(contracts_dir, "lab_contracts.yaml"), "r") as f:
+            policy = yaml.safe_load(f).get("dispatch_policy", {})
+        with open(os.path.join(contracts_dir, "dispatch_packet.schema.json"), "r") as f:
+            schema = json.load(f)
+        schema_props = schema.get("properties", {})
+        _t13_checks = [
+            ("valid_types", "type", policy.get("valid_types", [])),
+            ("blocking_dispatch_modes", "dispatch_mode", None),
+            ("blocking_dispatch_blocks", "dispatch_block", None),
+            ("blocking_escalation_levels", "escalation_level", None),
+        ]
+        for policy_key, schema_key, policy_values in _t13_checks:
+            if policy_values is None:
+                continue
+            schema_enum = schema_props.get(schema_key, {}).get("enum", [])
+            if not schema_enum:
+                continue
+            policy_set = set(policy_values)
+            schema_set = set(schema_enum)
+            if policy_key == "valid_types" and policy_set != schema_set:
+                _add_finding(findings, "T.13", "MUST-FIX", f"schema.{schema_key}",
+                             f"dispatch_policy.{policy_key} and schema enum diverge: "
+                             f"policy-only={sorted(policy_set - schema_set)}, schema-only={sorted(schema_set - policy_set)}")
+    except (OSError, json.JSONDecodeError, yaml.YAMLError):
+        pass
+
+    # T.14: code gate patterns vs policy gate registry
+    try:
+        policy_gates = set(policy.get("validation_gates", {}).keys())
+        dispatch_path = os.path.join(ROOT, "dispatch.py")
+        with open(dispatch_path, "r") as f:
+            dispatch_source = f.read()
+        import re as _re
+        code_gates = set(_re.findall(r'(?:^[ \t]*#[ \t]*|")(V\d+):', dispatch_source, _re.MULTILINE))
+        policy_only = sorted(policy_gates - code_gates)
+        code_only = sorted(code_gates - policy_gates)
+        if policy_only:
+            _add_finding(findings, "T.14", "MUST-FIX", "validation_gates",
+                         f"gates in dispatch_policy but not in dispatch.py: {', '.join(policy_only)}")
+        if code_only:
+            _add_finding(findings, "T.14", "MUST-FIX", "validation_gates",
+                         f"gates in dispatch.py but not in dispatch_policy: {', '.join(code_only)}")
+    except OSError:
+        pass
+
+    # T.15: committed instruction baselines vs live draft instruction hash
+    baselines_path = os.path.join(ROOT, "contracts", "instruction_baselines.yaml")
+    try:
+        with open(baselines_path, "r") as f:
+            baselines = yaml.safe_load(f) or {}
+        agents_by_key = {agent["key"]: agent for agent in snapshot["agents"]}
+        for agent_key, baseline_hash in sorted(baselines.items()):
+            agent = agents_by_key.get(agent_key)
+            if not agent or not agent.get("draft_instruction_hash"):
+                continue
+            if baseline_hash != agent["draft_instruction_hash"]:
+                _add_finding(findings, "T.15", "P0", agent_key,
+                             "live Notion instructions differ from committed baseline")
+    except (OSError, yaml.YAMLError):
+        pass
+
     metadata = {
         "lookback_days": lookback_days,
         "sample_limit": sample_limit,
@@ -1342,6 +1406,23 @@ def render_snapshot_summary(snapshot: dict[str, Any]) -> str:
             f"- {contract['name']}: {contract['source_resolved']['label']} -> {contract['target_resolved']['label']} on {contract.get('database_label') or contract.get('database')}"
         )
     return "\n".join(lines)
+
+
+def refresh_baselines() -> None:
+    """Snapshot current live instruction hashes into the committed baseline file."""
+    snapshot = compile_snapshot()
+    baselines = {}
+    for agent in snapshot["agents"]:
+        h = agent.get("draft_instruction_hash")
+        if h:
+            baselines[agent["key"]] = h
+    baselines_path = os.path.join(ROOT, "contracts", "instruction_baselines.yaml")
+    with open(baselines_path, "w") as f:
+        f.write("# Committed instruction baselines for T.15 drift detection.\n")
+        f.write("# Update deliberately after reviewing instruction changes.\n")
+        f.write("# Generate: cli/.venv/bin/python -c \"from lab_topology import refresh_baselines; refresh_baselines()\"\n")
+        f.write(yaml.dump(baselines, default_flow_style=False, sort_keys=True))
+    print(f"{len(baselines)} baselines written to {baselines_path}")
 
 
 def render_drift_report(report: dict[str, Any]) -> str:

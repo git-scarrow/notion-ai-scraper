@@ -1,3 +1,50 @@
+dispatch_policy:
+  blocking_dispatch_modes: [incubate]
+  blocking_dispatch_blocks: [pre_repo_incubation, safety_hold]
+  blocking_escalation_levels: [Needs Sam, Critical]
+  terminal_statuses: [Done, Passed, Kill Condition Met, Inconclusive, Closed, Blocked]
+  valid_types:
+    - Gauntlet
+    - Measurement Track
+    - Literature Survey
+    - Design Spec
+    - Feasibility Analysis
+    - Implementation
+    - Operational
+    - Review
+    - Experiment
+    - Fact-Check
+    - Other
+  defaults:
+    dispatch_mode: execute
+    max_active_items: 2
+    retry_count: 0
+    escalation_level: Normal
+    min_terminal_value: Any
+    retry_escalation_threshold: 2
+  validation_gates:
+    V1:  { check: valid_uuid, fatal: true }
+    V2:  { check: known_dispatch_via, fatal: true }
+    V3:  { check: valid_execution_lane, fatal: true }
+    V4:  { check: valid_environment, fatal: true }
+    V5:  { check: lane_environment_compatible, fatal: true }
+    V6:  { check: objective_non_empty, fatal: true }
+    V7:  { check: gauntlet_kill_condition, fatal: true }
+    V8:  { check: no_active_run_id, fatal: true }
+    V9:  { check: dispatch_request_exists, fatal: true }
+    V10: { check: not_already_consumed, fatal: true }
+    V11: { check: production_audit_flag, fatal: false }
+    V12: { check: branch_default, fatal: false }
+    V13: { check: pre_flight_mode, fatal: true }
+    V14: { check: cascade_depth, fatal: true }
+    V15: { check: blocking_dispatch_mode, fatal: true }
+    V16: { check: blocking_dispatch_block, fatal: true }
+    V17: { check: repo_ready, fatal: true }
+    V18: { check: blocked_reason, fatal: true }
+    V19: { check: blocking_escalation, fatal: true }
+    V20: { check: project_wip_cap, fatal: true }
+    V21: { check: project_focus, fatal: true }
+
 contracts:
   - name: dispatch_mode_native_dispatch
     source: work_items
@@ -27,14 +74,14 @@ contracts:
     rollout_started_at: "2026-03-21T00:00:00+00:00"
     trigger_fields:
       - Lab Dispatch Requested At
-    consumed_fields:
-      - Prompt Request Received At
     produced_fields:
+      - Lab Dispatch Consumed At
       - Prompt Notes
       - GitHub Issue URL
       - Prompt Request Received At
+      - Incubation Requested At
     required_artifacts:
-      - Prompt Request Received At
+      - Lab Dispatch Consumed At
     selector: {}
     upstream_complete_fields:
       - Lab Dispatch Requested At
@@ -44,6 +91,35 @@ contracts:
         agent: lab_dispatcher
       - kind: repo_enforced
         path: cli/dispatch.py
+      - kind: instruction_contract
+        agent: lab_dispatcher
+    note: >
+      Execute mode: produces Prompt Notes, GitHub Issue URL, Prompt Request Received At.
+      Incubate mode: produces Lab Dispatch Consumed At, Incubation Requested At (routes to incubation author).
+
+  - name: dispatch_incubate_to_author
+    source: work_items
+    target: lab_incubation_author
+    database: work_items
+    trigger_fields:
+      - Incubation Requested At
+    produced_fields:
+      - Outcome
+      - Lab Results Posted At
+      - Librarian Request Received At
+    required_artifacts:
+      - Outcome
+      - Lab Results Posted At
+      - Librarian Request Received At
+    selector: {}
+    upstream_complete_fields:
+      - Incubation Requested At
+    required_access: read_and_write
+    evidence_sources:
+      - kind: agent_trigger
+        agent: lab_incubation_author
+      - kind: instruction_contract
+        agent: lab_incubation_author
 
   - name: prompt_request_to_prompt_architect
     source: work_items

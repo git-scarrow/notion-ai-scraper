@@ -73,9 +73,9 @@ def register(mcp, cfg):
         """
         Build and validate a dispatch packet for a Work Item.
 
-        Reads the Work Item, resolves inheritance from its Project, applies the
-        Dispatch Via -> Execution Lane default mapping, and runs V1-V14 validation
-        (including Pre-Flight Mode and Cascade Depth gates).
+        Reads the Work Item, resolves inheritance from its Project, applies
+        Execution Lane defaults, and runs all registered validation gates
+        (V1-V21, including Pre-Flight Mode and Cascade Depth).
 
         work_item_id: UUID of the Work Item page.
 

@@ -21,6 +21,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
+import yaml
+
 import notion_api
 from config import get_config
 
@@ -34,26 +36,34 @@ def _load_contract(name: str) -> dict[str, Any]:
         return json.load(f)
 
 
+def _load_dispatch_policy() -> dict[str, Any]:
+    with open(os.path.join(_CONTRACTS_DIR, "lab_contracts.yaml"), "r") as f:
+        return yaml.safe_load(f).get("dispatch_policy", {})
+
+
 LANE_CAPABILITIES = _load_contract("lane_capabilities.json")
 ENV_RESTRICTIONS = _load_contract("environment_restrictions.json")
 VERDICT_MAPPING = _load_contract("verdict_state_mapping.json")
 REDACTION_CONFIG = _load_contract("redaction_patterns.json")
 
+_POLICY = _load_dispatch_policy()
+
 VALID_LANES = set(LANE_CAPABILITIES["lanes"].keys())
 VALID_ENVIRONMENTS = set(ENV_RESTRICTIONS["environments"].keys())
 DISPATCH_VIA_DEFAULTS = LANE_CAPABILITIES["dispatch_via_defaults"]
 VALID_DISPATCH_VIA = set(DISPATCH_VIA_DEFAULTS.keys())
-VALID_TYPES = {"Gauntlet", "Measurement Track", "Literature Survey", "Design Spec", "Feasibility Analysis", "Implementation", "Operational", "Review", "Experiment", "Fact-Check", "Other"}
-TERMINAL_STATUSES = {"Done", "Passed", "Kill Condition Met", "Inconclusive", "Closed", "Blocked"}
-DEFAULT_MAX_ACTIVE_ITEMS = 2
-DEFAULT_RETRY_COUNT = 0
-DEFAULT_ESCALATION_LEVEL = "Normal"
-BLOCKING_ESCALATION_LEVELS = {"Needs Sam", "Critical"}
-RETRY_ESCALATION_THRESHOLD = 2
-DEFAULT_MIN_TERMINAL_VALUE = "Any"
-DEFAULT_DISPATCH_MODE = "execute"
-BLOCKING_DISPATCH_MODES = {"incubate"}
-BLOCKING_DISPATCH_BLOCKS = {"pre_repo_incubation", "safety_hold"}
+VALID_TYPES = set(_POLICY["valid_types"])
+TERMINAL_STATUSES = set(_POLICY["terminal_statuses"])
+DEFAULT_MAX_ACTIVE_ITEMS = _POLICY["defaults"]["max_active_items"]
+DEFAULT_RETRY_COUNT = _POLICY["defaults"]["retry_count"]
+DEFAULT_ESCALATION_LEVEL = _POLICY["defaults"]["escalation_level"]
+BLOCKING_ESCALATION_LEVELS = set(_POLICY["blocking_escalation_levels"])
+RETRY_ESCALATION_THRESHOLD = _POLICY["defaults"]["retry_escalation_threshold"]
+DEFAULT_MIN_TERMINAL_VALUE = _POLICY["defaults"]["min_terminal_value"]
+DEFAULT_DISPATCH_MODE = _POLICY["defaults"]["dispatch_mode"]
+BLOCKING_DISPATCH_MODES = set(_POLICY["blocking_dispatch_modes"])
+BLOCKING_DISPATCH_BLOCKS = set(_POLICY["blocking_dispatch_blocks"])
+VALIDATION_GATES = _POLICY.get("validation_gates", {})
 
 
 # ── Property extraction helpers ──────────────────────────────────────────────

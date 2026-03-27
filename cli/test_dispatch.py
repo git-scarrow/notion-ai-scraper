@@ -167,6 +167,19 @@ def test_contracts_loaded():
     assert len(dispatch.DISPATCH_VIA_DEFAULTS) == 8
 
 
+def test_dispatch_policy_loaded_from_yaml():
+    """Dispatch policy constants are loaded from lab_contracts.yaml, not hardcoded."""
+    assert len(dispatch.VALIDATION_GATES) == 21
+    assert dispatch.BLOCKING_DISPATCH_MODES == {"incubate"}
+    assert dispatch.BLOCKING_DISPATCH_BLOCKS == {"pre_repo_incubation", "safety_hold"}
+    assert dispatch.BLOCKING_ESCALATION_LEVELS == {"Needs Sam", "Critical"}
+    assert dispatch.DEFAULT_DISPATCH_MODE == "execute"
+    assert dispatch.DEFAULT_MAX_ACTIVE_ITEMS == 2
+    assert dispatch.RETRY_ESCALATION_THRESHOLD == 2
+    assert "Gauntlet" in dispatch.VALID_TYPES
+    assert "Done" in dispatch.TERMINAL_STATUSES
+
+
 def test_lane_capabilities_structure():
     """Each lane has required capability fields."""
     for lane, caps in dispatch.LANE_CAPABILITIES["lanes"].items():

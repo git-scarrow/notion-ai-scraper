@@ -1789,7 +1789,30 @@ if CFG and CFG.has_lab_config:
     dispatch_tools.register(mcp, CFG)
 
 
+def _sync_mirrors_background():
+    """Auto-sync agent instruction mirrors on startup (background thread)."""
+    try:
+        from agent_mirror import dump_as_manifest
+        mirrors_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mirrors")
+        os.makedirs(mirrors_dir, exist_ok=True)
+        agents_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.yaml")
+        with open(agents_path, "r") as f:
+            registry = yaml.safe_load(f) or {}
+        for agent_name in registry:
+            try:
+                yaml_content, instructions = dump_as_manifest(agent_name)
+                with open(os.path.join(mirrors_dir, f"{agent_name}.yaml"), "w") as f:
+                    f.write(yaml_content)
+                with open(os.path.join(mirrors_dir, f"{agent_name}.md"), "w") as f:
+                    f.write(instructions)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def main():
+    threading.Thread(target=_sync_mirrors_background, daemon=True).start()
     transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
     mcp.run(transport=transport)
 

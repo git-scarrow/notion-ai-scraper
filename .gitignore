@@ -8,6 +8,7 @@ __pycache__/
 cli/.venv/
 cli/__pycache__/
 cli/agents.yaml
+cli/mirrors/
 test/__pycache__/
 .claude/
 .mcp.json

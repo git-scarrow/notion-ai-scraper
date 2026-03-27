@@ -1333,6 +1333,29 @@ def evaluate_drift(
                 "Lab-only dispatch was requested, but Lab Results Posted At is still empty",
             )
 
+    # T.16: consumptive progress — passed incubation items must be accounted for
+    for item in recent_summaries:
+        dispatch_mode = (item.get("Dispatch Mode") or "").strip().lower()
+        status = item.get("Status") or ""
+        disposition = item.get("Disposition") or ""
+        superseded_by = item.get("Superseded By") or []
+        if dispatch_mode != "incubate":
+            continue
+        if status not in {"Passed", "Done", "Kill Condition Met", "Inconclusive"}:
+            continue
+        if disposition == "Archive":
+            continue
+        if superseded_by:
+            continue
+        subject = item.get("Item Name") or item["id"]
+        _add_finding(
+            findings,
+            "T.16",
+            "P0",
+            subject,
+            "Passed incubation item has no Superseded By and no Disposition=Archive — incubation output is stranded",
+        )
+
     for item in recent_summaries:
         if not item.get("Synthesis Consumed At"):
             continue

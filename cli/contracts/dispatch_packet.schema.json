@@ -6,7 +6,7 @@
   "type": "object",
   "required": [
     "version", "run_id", "work_item_id", "work_item_name",
-    "objective", "dispatch_via", "execution_lane", "environment",
+    "objective", "execution_lane", "environment",
     "type", "created_at", "constraints"
   ],
   "properties": {
@@ -19,8 +19,8 @@
     "objective":      {"type": "string", "minLength": 1},
     "kill_condition":  {"type": ["string", "null"]},
     "dispatch_via":   {
-      "type": "string",
-      "enum": ["Claude", "Claude Code", "Gemini", "Cursor", "Codex", "Copilot", "Antigravity", "Manual"]
+      "type": ["string", "null"],
+      "enum": ["Claude", "Claude Code", "Gemini", "Cursor", "Codex", "Copilot", "Antigravity", "Manual", null]
     },
     "execution_lane": {
       "type": "string",

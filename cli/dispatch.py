@@ -487,16 +487,16 @@ def build_dispatch_packet(
     except ValueError:
         errors.append(f"V1: work_item_id '{work_item_id}' is not a valid UUID")
 
-    # V2: known dispatch_via
-    if not dispatch_via:
-        errors.append("V2: dispatch_via is empty")
-    elif dispatch_via not in VALID_DISPATCH_VIA:
+    # V2: known dispatch_via (optional — recorded post-execution when absent)
+    if dispatch_via and dispatch_via not in VALID_DISPATCH_VIA:
         errors.append(f"V2: dispatch_via '{dispatch_via}' is not a known value")
 
-    # V3: valid execution lane
+    # Default execution lane to "dev" when neither Dispatch Via nor Execution Lane is set
     if not execution_lane:
-        errors.append("V3: execution_lane could not be resolved (set Execution Lane or use a non-Manual Dispatch Via)")
-    elif execution_lane not in VALID_LANES:
+        execution_lane = "dev"
+
+    # V3: valid execution lane
+    if execution_lane not in VALID_LANES:
         errors.append(f"V3: execution_lane '{execution_lane}' is not a valid lane")
 
     # V4: valid environment
@@ -532,10 +532,6 @@ def build_dispatch_packet(
     # V10: not already consumed
     if consumed_at:
         errors.append(f"V10: Dispatch Requested Consumed At is already set ({consumed_at})")
-
-    raw_dispatch_mode = _select(props, "Dispatch Mode")
-    if not raw_dispatch_mode:
-        errors.append("V20: Dispatch Mode is empty (must be 'execute' or 'incubate')")
 
     if queue_state["dispatch_mode"] in BLOCKING_DISPATCH_MODES:
         errors.append(f"V15: dispatch_mode '{queue_state['dispatch_mode']}' is Lab-only and cannot enter Factory dispatch")
@@ -598,7 +594,7 @@ def build_dispatch_packet(
         "project_id": project_id,
         "objective": objective,
         "kill_condition": kill_condition or None,
-        "dispatch_via": dispatch_via,
+        "dispatch_via": dispatch_via,  # may be None; set post-execution
         "execution_lane": execution_lane,
         "environment": environment,
         "branch": branch,

@@ -1,7 +1,7 @@
 """
 test_dispatch.py — Unit tests for the dispatch adapter.
 
-Tests validation rules V1-V12, inheritance resolution, and Dispatch Via defaults.
+Tests validation rules V1-V21, inheritance resolution, and lane defaults.
 Run: cd cli && .venv/bin/python -m pytest test_dispatch.py -v
 """
 
@@ -222,20 +222,22 @@ class TestValidation:
         result = dispatch.build_dispatch_packet("not-a-uuid", client)
         assert any("V1" in e for e in result["errors"])
 
-    def test_v2_empty_dispatch_via(self):
-        """V2: Empty dispatch_via."""
-        result = self._build(dispatch_via=None)
-        assert any("V2" in e for e in result["errors"])
+    def test_v2_empty_dispatch_via_ok(self):
+        """V2: Empty dispatch_via is allowed (set post-execution)."""
+        result = self._build(dispatch_via=None, repo_ready=True)
+        assert not any("V2" in e for e in result.get("errors", []))
 
     def test_v2_unknown_dispatch_via(self):
         """V2: Unknown dispatch_via value."""
         result = self._build(dispatch_via="UnknownProvider")
         assert any("V2" in e for e in result["errors"])
 
-    def test_v3_unresolvable_lane(self):
-        """V3: Manual dispatch with no explicit lane."""
-        result = self._build(dispatch_via="Manual", execution_lane=None)
-        assert any("V3" in e for e in result["errors"])
+    def test_v3_no_lane_defaults_to_dev(self):
+        """V3: No explicit lane and no dispatch_via defaults to 'dev'."""
+        result = self._build(dispatch_via=None, execution_lane=None, repo_ready=True)
+        assert not any("V3" in e for e in result.get("errors", []))
+        if result["packet"]:
+            assert result["packet"]["execution_lane"] == "dev"
 
     def test_v3_invalid_lane(self):
         """V3: Explicitly set invalid lane."""
@@ -460,11 +462,11 @@ def test_dispatch_packet_schema_valid():
         schema = json.load(f)
 
     wid = str(uuid.uuid4())
-    props = _make_props()
+    props = _make_props(repo_ready=True)
     client = _mock_client(props, wid)
     result = dispatch.build_dispatch_packet(wid, client)
 
-    assert result["errors"] == []
+    assert result["errors"] == [], result["errors"]
     jsonschema.validate(result["packet"], schema)
 
 

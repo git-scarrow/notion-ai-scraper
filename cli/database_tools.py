@@ -361,6 +361,26 @@ def _format_property_value(prop: dict, client: "notion_api.NotionAPIClient | Non
     return str(prop)
 
 
+def _resolve_database_id(client, raw_id: str) -> str:
+    """If raw_id is a page inside a database, return the parent database ID.
+    Otherwise return raw_id unchanged."""
+    db_id = _to_dashed_uuid(raw_id)
+    try:
+        client.retrieve_database(db_id)
+        return db_id
+    except RuntimeError as exc:
+        if "is a page, not a database" not in str(exc):
+            raise
+    # It's a page — check if its parent is a database
+    page = client.retrieve_page(db_id)
+    parent = page.get("parent", {})
+    if parent.get("type") == "database_id":
+        return parent["database_id"]
+    raise RuntimeError(
+        f"{db_id} is a page but its parent is {parent.get('type', 'unknown')}, not a database."
+    )
+
+
 def describe_database(database_id: str) -> str:
     """
     Show a Notion database's schema: property names, types, and select/status options.
@@ -368,10 +388,11 @@ def describe_database(database_id: str) -> str:
     Call this BEFORE query_database if you don't know the exact property names and
     types. The output tells you which filter type to use for each property.
 
-    database_id: The database page UUID (dashed or dashless).
+    database_id: Database UUID or a page UUID inside the database (dashed or dashless).
+        If a page ID is given, the parent database is resolved automatically.
     """
-    db_id = _to_dashed_uuid(database_id)
     client = _get_notion_api_client()
+    db_id = _resolve_database_id(client, database_id)
     db = client.retrieve_database(db_id)
 
     # Extract title

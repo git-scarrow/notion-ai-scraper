@@ -1141,7 +1141,9 @@ def describe_database(database_id: str) -> str:
     Call this BEFORE query_database if you don't know the exact property names and
     types. The output tells you which filter type to use for each property.
 
-    database_id: The database page UUID (dashed or dashless).
+    database_id: Database UUID or a page UUID inside the database (dashed or
+        dashless). If a page ID is given, the parent database is resolved
+        automatically.
     """
     return database_tools.describe_database(database_id)
 
@@ -1165,8 +1167,8 @@ def query_database(
     (created_by, created_time, etc.) are hidden by default — list them explicitly
     in 'properties' to show them.
 
-    database_id: The database page UUID (dashed or dashless), NOT the collection://
-        data source ID.
+    database_id: The UUID of the database itself (dashed or dashless), NOT a row's
+        page ID or a collection:// data source ID.
     filter: Optional JSON string with a Notion API filter object. The filter type
         key MUST match the property's actual type. Use describe_database to check.
         Example: '{"property": "Status", "status": {"equals": "Active"}}'

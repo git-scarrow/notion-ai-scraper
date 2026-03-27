@@ -1,21 +1,24 @@
 contracts:
-  - name: dispatch_via_native_dispatch
+  - name: dispatch_mode_native_dispatch
     source: work_items
-    target: native_dispatch_webhook
+    target: native_dispatch_automation
     database: work_items
     trigger_fields:
-      - Dispatch Via
+      - Dispatch Mode
     produced_fields:
-      - Dispatch Requested Received At
+      - Lab Dispatch Requested At
     required_artifacts:
-      - Dispatch Requested Received At
-    selector: {}
+      - Lab Dispatch Requested At
+    selector:
+      Dispatch Mode:
+        - execute
+        - incubate
     upstream_complete_fields:
-      - Dispatch Via
+      - Dispatch Mode
     evidence_sources:
       - kind: native_automation
         database: work_items
-        note: Dispatch Via change stamps Dispatch Requested Received At and calls the webhook.
+        note: Dispatch Mode change stamps Lab Dispatch Requested At. Dispatch Via is optional metadata, recorded post-execution.
 
   - name: dispatch_request_to_dispatcher
     source: work_items
@@ -78,6 +81,7 @@ contracts:
       - Return Received At
       - Return Consumed At
       - Outcome
+      - Dispatch Via
     required_artifacts:
       - Return Received At
     selector: {}

@@ -62,6 +62,9 @@ _auth_cache_time: float = 0
 _auth_db_mtime: float = 0   # mtime of Firefox cookies.sqlite at last read
 _auth_lock = threading.Lock()
 _AUTH_TTL = 300  # seconds — re-read cookies every 5 minutes
+_TOKEN_FILE = os.path.expanduser("~/.notion-token-v2")
+_KEEPALIVE_INTERVAL = 3600  # seconds — ping Notion hourly to keep session alive
+_AUTH_SOURCE: str = "none"  # tracks where the current token came from
 
 _registry_cache: dict | None = None
 _registry_mtime: float = 0
@@ -152,42 +155,111 @@ def _sync_template_data(registry: dict) -> str | None:
     return f"Synced {added} new agent(s) to template-data.json."
 
 
-def _get_auth(force: bool = False) -> tuple[str, str | None]:
-    """Return (token_v2, user_id) with TTL + mtime caching.
+def _read_token_file() -> tuple[str, str | None] | None:
+    """Read token_v2 (and optional user_id) from ~/.notion-token-v2.
 
-    Re-reads Firefox cookies if:
-    - force=True (e.g. after a 401)
-    - TTL expired
-    - Firefox's cookies.sqlite has been modified since last read (user re-logged in)
+    File format: first line is token_v2, optional second line is user_id.
     """
-    global _auth_cache, _auth_cache_time, _auth_db_mtime
+    try:
+        with open(_TOKEN_FILE) as f:
+            lines = f.read().strip().splitlines()
+        if not lines or not lines[0].strip():
+            return None
+        token = lines[0].strip()
+        user_id = lines[1].strip() if len(lines) > 1 and lines[1].strip() else None
+        return token, user_id
+    except (OSError, IndexError):
+        return None
+
+
+def _write_token_file(token: str, user_id: str | None) -> None:
+    """Persist token_v2 (and user_id) to ~/.notion-token-v2 for reuse across restarts."""
+    try:
+        content = token
+        if user_id:
+            content += f"\n{user_id}"
+        content += "\n"
+        fd = os.open(_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, content.encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        pass  # best-effort
+
+
+def _get_auth(force: bool = False) -> tuple[str, str | None]:
+    """Return (token_v2, user_id) with cascading sources and caching.
+
+    Auth cascade (first match wins):
+    1. NOTION_TOKEN_V2 env var (+ optional NOTION_USER_ID)
+    2. ~/.notion-token-v2 file
+    3. Firefox cookies.sqlite
+
+    On successful Firefox extraction, persists to token file for next time.
+    Re-reads on force=True, TTL expiry, or Firefox DB mtime change.
+    """
+    global _auth_cache, _auth_cache_time, _auth_db_mtime, _AUTH_SOURCE
     now = time.monotonic()
     with _auth_lock:
         if not force and _auth_cache is not None:
-            # Check mtime before trusting TTL
+            # For env var source, trust the cache (env doesn't change)
+            if _AUTH_SOURCE == "env":
+                return _auth_cache
+            # For file/firefox, check staleness
+            ttl_valid = (now - _auth_cache_time) < _AUTH_TTL
+            if _AUTH_SOURCE == "file" and ttl_valid:
+                return _auth_cache
+            if _AUTH_SOURCE == "firefox":
+                try:
+                    db_path = cookie_extract.get_firefox_cookies_db()
+                    current_mtime = os.path.getmtime(db_path)
+                except Exception:
+                    current_mtime = _auth_db_mtime
+                if current_mtime == _auth_db_mtime and ttl_valid:
+                    return _auth_cache
+
+        # Source 1: environment variable
+        env_token = os.environ.get("NOTION_TOKEN_V2")
+        if env_token:
+            _auth_cache = (env_token, os.environ.get("NOTION_USER_ID"))
+            _auth_cache_time = now
+            _AUTH_SOURCE = "env"
+            return _auth_cache
+
+        # Source 2: token file
+        file_auth = _read_token_file()
+        if file_auth and not force:
+            _auth_cache = file_auth
+            _auth_cache_time = now
+            _AUTH_SOURCE = "file"
+            return _auth_cache
+
+        # Source 3: Firefox cookies
+        try:
+            _auth_cache = cookie_extract.get_auth()
+            _auth_cache_time = now
+            _AUTH_SOURCE = "firefox"
             try:
                 db_path = cookie_extract.get_firefox_cookies_db()
-                current_mtime = os.path.getmtime(db_path)
+                _auth_db_mtime = os.path.getmtime(db_path)
             except Exception:
-                current_mtime = _auth_db_mtime  # can't stat, use cached
-
-            db_unchanged = (current_mtime == _auth_db_mtime)
-            ttl_valid = (now - _auth_cache_time) < _AUTH_TTL
-            if db_unchanged and ttl_valid:
+                pass
+            # Persist to file for next time
+            _write_token_file(_auth_cache[0], _auth_cache[1])
+            return _auth_cache
+        except (ValueError, FileNotFoundError):
+            # Firefox extraction failed — retry token file even on force
+            if file_auth:
+                _auth_cache = file_auth
+                _auth_cache_time = now
+                _AUTH_SOURCE = "file"
                 return _auth_cache
-
-        _auth_cache = cookie_extract.get_auth()
-        _auth_cache_time = now
-        try:
-            db_path = cookie_extract.get_firefox_cookies_db()
-            _auth_db_mtime = os.path.getmtime(db_path)
-        except Exception:
-            pass
-        return _auth_cache
+            raise
 
 
 def _invalidate_auth() -> None:
-    """Force next _get_auth() call to re-read Firefox cookies."""
+    """Force next _get_auth() call to re-read from sources."""
     global _auth_cache
     with _auth_lock:
         _auth_cache = None
@@ -216,8 +288,9 @@ def auth_retry(tool_fn):
                 return tool_fn(*args, **kwargs)
             except PermissionError:
                 raise PermissionError(
-                    f"Notion authentication failed after re-reading cookies. "
-                    f"Open Firefox and log into Notion, then retry. ({e})"
+                    f"Notion auth failed after retry. Sources tried: "
+                    f"NOTION_TOKEN_V2 env, {_TOKEN_FILE}, Firefox cookies. "
+                    f"Set NOTION_TOKEN_V2 or refresh Firefox session. ({e})"
                 )
     return wrapper
 
@@ -1811,8 +1884,24 @@ def _sync_mirrors_background():
         pass
 
 
+def _keepalive_loop() -> None:
+    """Background thread: periodically ping Notion to keep token_v2 session alive."""
+    import logging
+    log = logging.getLogger("notion-agents.keepalive")
+    while True:
+        time.sleep(_KEEPALIVE_INTERVAL)
+        try:
+            token, user_id = _get_auth()
+            # Lightweight call — loadUserContent returns spaces/settings
+            notion_client._post("loadUserContent", {}, token, user_id)
+            log.debug("keep-alive ping OK (source=%s)", _AUTH_SOURCE)
+        except Exception as exc:
+            log.warning("keep-alive ping failed: %s", exc)
+
+
 def main():
     threading.Thread(target=_sync_mirrors_background, daemon=True).start()
+    threading.Thread(target=_keepalive_loop, daemon=True, name="notion-keepalive").start()
     transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
     mcp.run(transport=transport)
 

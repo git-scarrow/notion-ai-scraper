@@ -21,3 +21,4 @@ cli/eval/essays/unbelievable-story.md
 cli/eval/essays/gilded-age.md
 gemini-conversation-*.json
 tmp/
+lancedb/

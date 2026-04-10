@@ -55,6 +55,9 @@ class ClaudeProjectClient:
     def list_docs(self, project_id: str) -> list[dict]:
         return self._request("GET", f"projects/{project_id}/docs")
 
+    def get_doc(self, project_id: str, doc_uuid: str) -> dict:
+        return self._request("GET", f"projects/{project_id}/docs/{doc_uuid}")
+
     def upload_doc(self, project_id: str, file_name: str, content: str) -> dict:
         return self._request(
             "POST",
@@ -69,3 +72,18 @@ class ClaudeProjectClient:
 
     def get_memory(self, project_id: str) -> dict:
         return self._request("GET", f"projects/{project_id}/memory")
+
+    # -- Conversations --
+
+    def list_conversations(self, project_id: str, limit: int = 50) -> list[dict]:
+        result = self._request(
+            "GET",
+            f"projects/{project_id}/conversations_v2?limit={limit}&offset=0",
+        )
+        if isinstance(result, dict):
+            return result.get("data", [])
+        return result or []
+
+    def get_conversation(self, conv_uuid: str) -> dict:
+        """Fetch a conversation with its full message history."""
+        return self._request("GET", f"chat_conversations/{conv_uuid}?rendering_mode=raw")

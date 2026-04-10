@@ -6,6 +6,7 @@ Usage:
   python cli/update_agent.py librarian instructions.md        # update + publish
   python cli/update_agent.py librarian instructions.md --dry-run
   python cli/update_agent.py librarian --publish-only         # re-publish without changes
+  python cli/update_agent.py librarian --publish-only --archive-existing
   python cli/update_agent.py librarian --dump                 # print current instructions
 
 Requires:
@@ -87,7 +88,8 @@ def cmd_dump(cfg: dict, token: str, user_id: str | None) -> None:
 
 def cmd_update(cfg: dict, instructions_file: str,
                token: str, user_id: str | None,
-               dry_run: bool, publish: bool) -> None:
+               dry_run: bool, publish: bool,
+               archive_existing: bool) -> None:
     """Replace block content and optionally publish."""
     try:
         with open(instructions_file) as f:
@@ -114,16 +116,24 @@ def cmd_update(cfg: dict, instructions_file: str,
     )
 
     if publish:
-        cmd_publish(cfg, token, user_id, dry_run)
+        cmd_publish(cfg, token, user_id, dry_run, archive_existing=archive_existing)
     else:
         print("Content updated. Skipping publish (use --publish-only to deploy).", file=sys.stderr)
 
 
-def cmd_publish(cfg: dict, token: str, user_id: str | None, dry_run: bool) -> None:
+def cmd_publish(
+    cfg: dict,
+    token: str,
+    user_id: str | None,
+    dry_run: bool,
+    *,
+    archive_existing: bool,
+) -> None:
     """Publish the agent workflow."""
     print(f"Publishing agent (workflow {cfg['notion_internal_id']})...", file=sys.stderr)
     result = notion_client.publish_agent(
         cfg["notion_internal_id"], cfg["space_id"], token, user_id, dry_run,
+        archive_existing=archive_existing,
     )
     if dry_run:
         return
@@ -171,6 +181,8 @@ Examples:
                         help="Print current instructions as Markdown and exit")
     parser.add_argument("--no-publish", action="store_true",
                         help="Update content but skip the publish step")
+    parser.add_argument("--archive-existing", action="store_true",
+                        help="Archive existing manual chats after publish. Off by default.")
 
     args = parser.parse_args()
 
@@ -190,13 +202,20 @@ Examples:
     if args.dump:
         cmd_dump(cfg, token, user_id)
     elif args.publish_only:
-        cmd_publish(cfg, token, user_id, args.dry_run)
+        cmd_publish(
+            cfg,
+            token,
+            user_id,
+            args.dry_run,
+            archive_existing=args.archive_existing,
+        )
     else:
         cmd_update(
             cfg, args.instructions,
             token, user_id,
             dry_run=args.dry_run,
             publish=not args.no_publish,
+            archive_existing=args.archive_existing,
         )
 
 

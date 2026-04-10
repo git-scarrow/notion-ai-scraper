@@ -4,9 +4,9 @@ github_return.py — Deterministic handoff from GitHub back to the Lab.
 
 Triggered by GitHub Actions (issue.closed or pull_request.closed).
 1. Finds the Work Item in Notion where 'GitHub Issue URL' matches.
-2. Updates Status to 'Done'.
-3. Triggers Librarian by setting 'Librarian Request' to true.
-4. Records the Run Date.
+2. Moves the Work Item into the return phase.
+3. Writes return timestamps for Intake Clerk to consume.
+4. Records the Run Date and audit trail.
 """
 
 import os
@@ -35,21 +35,27 @@ def find_work_item_by_url(client: notion_api.NotionAPIClient, url: str) -> dict[
 
 def perform_return(client: notion_api.NotionAPIClient, page_id: str, summary: str = ""):
     """Update Work Item status and signal the Intake Clerk."""
-    # Properties to update
+    now = notion_api.now_iso()
+    target_status = "Awaiting Intake"
+
+    # Return paths should only signal Intake Clerk. Intake Clerk owns
+    # Librarian Request Received At once it has actually ingested the result.
     properties = {
-        "Status": {"status": {"name": "Awaiting Intake"}}, # New phase-only status
+        "Status": {"status": {"name": target_status}},
         "Outcome": {"rich_text": [{"text": {"content": summary}}]} if summary else {},
-        "Run Date": {"date": {"start": notion_api.now_iso()}},
-        "Return Received At": {"date": {"start": notion_api.now_iso()}},
+        "Run Date": {"date": {"start": now}},
+        "Return Received At": {"date": {"start": now}},
+        "Return Consumed At": {"date": {"start": now}},
     }
-    
-    print(f"Updating Work Item {page_id} to 'Awaiting Intake'. Awaiting Intake Clerk.")
+
+    print(f"Updating Work Item {page_id} to '{target_status}'. Awaiting Intake Clerk.")
     try:
         client.update_page(page_id, properties=properties)
     except Exception as e:
-        if "Awaiting Intake" in str(e):
+        if target_status in str(e):
             print("Fallback: 'Awaiting Intake' status missing. Using legacy 'Done'.")
-            properties["Status"] = {"status": {"name": "Done"}}
+            target_status = "Done"
+            properties["Status"] = {"status": {"name": target_status}}
             client.update_page(page_id, properties=properties)
         else:
             raise e
@@ -62,17 +68,16 @@ def perform_return(client: notion_api.NotionAPIClient, page_id: str, summary: st
 
     # TLA+ Lab-Loop-v1: Log state transition to Audit Log
     try:
-        ts = notion_api.now_iso()
         client.create_page(
             parent={"database_id": CFG.audit_log_db_id},
             properties={
-                "Transition": {"title": [{"text": {"content": "InProgress→Done"}}]},
+                "Transition": {"title": [{"text": {"content": f"InProgress→{target_status}"}}]},
                 "Work Item": {"relation": [{"id": page_id}]},
                 "Agent": {"select": {"name": "Webhook Bridge"}},
                 "From Status": {"select": {"name": "In Progress"}},
-                "To Status": {"select": {"name": "Done"}},
+                "To Status": {"select": {"name": target_status}},
                 "Signal Consumed": {"select": {"name": "LR"}},
-                "Consumption Timestamp": {"date": {"start": ts}},
+                "Consumption Timestamp": {"date": {"start": now}},
             },
         )
     except Exception as e:

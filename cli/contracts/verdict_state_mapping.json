@@ -1,7 +1,7 @@
 {
   "version": "1.1",
   "gauntlet": {
-    "PASS":          {"status": "Passed",             "verdict": "Passed"},
+    "PASS":          {"status": "Done",               "verdict": "Passed"},
     "FAIL":          {"status": "Kill Condition Met",  "verdict": "Killed"},
     "INCONCLUSIVE":  {"status": "Done",                "verdict": "Inconclusive"},
     "OBSERVATIONS":  null

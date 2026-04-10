@@ -317,18 +317,7 @@ async def notion_dispatch_webhook(
     packet = result["packet"]
     run_id = packet["run_id"]
 
-    # ── Step 6: Stamp consumed (with race guard) ─────────────────────────
-    try:
-        stamp_result = dispatch.stamp_dispatch_consumed(page_id, run_id)
-    except Exception as e:
-        logger.error("stamp_dispatch_consumed(%s, %s) failed: %s", page_id, run_id, e)
-        return {"status": "stamp_failed", "page_id": page_id, "error": str(e)}
-
-    if stamp_result.get("status") in ("already_consumed", "wrong_status"):
-        logger.info("Skipping %s: %s", page_id, stamp_result)
-        return {"status": "skipped", "page_id": page_id, "reason": stamp_result}
-
-    # ── Step 7: Dispatch to OpenClaw ─────────────────────────────────────
+    # ── Step 6: Dispatch to OpenClaw ─────────────────────────────────────
     openclaw_result = _dispatch_to_openclaw(packet)
 
     logger.info(

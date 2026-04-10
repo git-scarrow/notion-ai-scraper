@@ -28,8 +28,8 @@ except ImportError:
 
 CFG = config.get_config()
 MODEL_EPOCH = datetime(2026, 3, 6, tzinfo=timezone.utc)
-TERMINAL_STATUSES = {"Done", "Passed", "Kill Condition Met", "Inconclusive", "Closed", "Blocked"}
-TERMINAL_BODY_SCAN_STATUSES = {"Done", "Passed", "Kill Condition Met", "Inconclusive"}
+TERMINAL_STATUSES = {"Done", "Kill Condition Met", "Inconclusive", "Closed", "Blocked"}
+TERMINAL_BODY_SCAN_STATUSES = {"Done", "Kill Condition Met", "Inconclusive"}
 PROMPT_ACTIVE_STATUSES = {"Queued", "Dispatched", "Generating", "Dispatch requested"}
 PROMPT_TERMINAL_STATUSES = {"Delivered", "Revised", "Skipped"}
 MAX_BODY_SCAN_ITEMS = 10
@@ -263,6 +263,7 @@ def check_lab_loop(
 
         drra = _get_date_start(props, "Dispatch Requested Received At")
         drca = _get_date_start(props, "Dispatch Requested Consumed At")
+        ldra = _get_date_start(props, "Lab Dispatch Requested At")
         lrra = _get_date_start(props, "Librarian Request Received At")
         lrca = _get_date_start(props, "Librarian Request Consumed At")
         github_issue_url = _get_url(props, "GitHub Issue URL")
@@ -285,8 +286,9 @@ def check_lab_loop(
             counters["e8a"] += 1
 
         if is_post_epoch:
-            if status == "Done" and drra and not drca:
-                _record(violations, "E.3", "MUST-FIX", name, "Status is Done but dispatch was never consumed (Dispatch Requested Received At set, Consumed At empty)")
+            if status == "Done" and (drra or ldra) and not drca:
+                signal = "Lab Dispatch Requested At" if ldra and not drra else "Dispatch Requested Received At"
+                _record(violations, "E.3", "MUST-FIX", name, f"Status is Done but dispatch was never consumed ({signal} set, Consumed At empty)")
                 counters["e3"] += 1
             if status == "Not Started" and synthesis_complete:
                 _record(violations, "E.3", "MUST-FIX", name, "Status is Not Started while Synthesis Complete is true")
@@ -302,7 +304,7 @@ def check_lab_loop(
             if status == "In Progress" and last_edited < now - timedelta(days=7):
                 _record(violations, "E.4", "MUST-FIX", name, "In Progress for more than 7 days")
                 counters["e4"] += 1
-            if status in {"Done", "Passed", "Kill Condition Met"} and not synthesis_complete and last_edited < now - timedelta(days=3):
+            if status in {"Done", "Kill Condition Met"} and not synthesis_complete and last_edited < now - timedelta(days=3):
                 _record(violations, "E.4", "NICE-TO-HAVE", name, f"{status} without synthesis for more than 3 days")
                 counters["e4_nice"] += 1
 
@@ -319,6 +321,9 @@ def check_lab_loop(
         if is_post_epoch:
             if drra and not drca:
                 _record(violations, "E.7", "P0", name, "Dispatch Requested Received At is set but Dispatch Requested Consumed At is empty (stalled dispatch)")
+                counters["e7"] += 1
+            if ldra and not drca:
+                _record(violations, "E.7", "P0", name, "Lab Dispatch Requested At is set but Dispatch Requested Consumed At is empty (stalled dispatch)")
                 counters["e7"] += 1
             if lrra and not lrca:
                 _record(violations, "E.7", "P0", name, "Librarian Request Received At exists but Librarian Request Consumed At is empty")

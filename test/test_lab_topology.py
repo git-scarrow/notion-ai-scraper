@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -138,6 +139,9 @@ def _make_snapshot() -> dict:
             ],
             "mcp_servers": [],
         },
+        "canonical_instruction_path": "/tmp/lab_dispatcher.md",
+        "canonical_instruction_source_present": True,
+        "draft_instruction_empty": False,
         "draft_instruction_hash": "draft-hash",
         "published_instruction_hash": "draft-hash",
         "instruction_last_edited_time": "2026-03-19T00:00:00+00:00",
@@ -402,10 +406,13 @@ def test_render_block_markdown_follows_multi_hop_copied_chain():
 
 
 def test_fetch_recent_work_items_uses_explicit_database_id_when_config_is_empty():
+    # Use a recent timestamp so the page falls inside the default 14-day lookback,
+    # regardless of when the test runs.
+    recent_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
     recent_page = {
         "id": "page-1",
-        "created_time": "2026-03-20T00:00:00Z",
-        "last_edited_time": "2026-03-20T00:00:00Z",
+        "created_time": recent_iso,
+        "last_edited_time": recent_iso,
         "properties": {},
     }
     fake_client = mock.Mock()
@@ -471,6 +478,31 @@ def test_evaluate_drift_flags_instruction_content_drift():
 
     assert any(
         finding["code"] == "T.4" and "instruction content differs" in finding["detail"]
+        for finding in report["findings"]
+    )
+
+
+def test_evaluate_drift_flags_missing_canonical_instruction_source_for_triggered_agent():
+    snapshot = _make_snapshot()
+    snapshot["agents"][0]["canonical_instruction_source_present"] = False
+    snapshot["agents"][0]["canonical_instruction_path"] = "/repo/cli/agent_instructions/lab_dispatcher.md"
+
+    report = lab_topology.evaluate_drift(snapshot, recent_work_items=[])
+
+    assert any(
+        finding["code"] == "T.4" and "no canonical instruction source" in finding["detail"]
+        for finding in report["findings"]
+    )
+
+
+def test_evaluate_drift_flags_empty_draft_instructions_for_triggered_agent():
+    snapshot = _make_snapshot()
+    snapshot["agents"][0]["draft_instruction_empty"] = True
+
+    report = lab_topology.evaluate_drift(snapshot, recent_work_items=[])
+
+    assert any(
+        finding["code"] == "T.4" and "empty draft instructions" in finding["detail"]
         for finding in report["findings"]
     )
 

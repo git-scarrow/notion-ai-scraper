@@ -118,8 +118,9 @@ def _extract_system_turn(step: dict) -> dict | None:
 
 
 def get_thread_conversation(thread_id: str, token_v2: str,
-                             user_id: str | None = None) -> dict:
-    thread_records = read_records("thread", [thread_id], token_v2, user_id)
+                             user_id: str | None = None,
+                             space_id: str | None = None) -> dict:
+    thread_records = read_records("thread", [thread_id], token_v2, user_id, space_id=space_id)
     if thread_id not in thread_records:
         raise ValueError(f"Thread '{thread_id}' not found.")
     thread = thread_records[thread_id]
@@ -160,6 +161,11 @@ def get_thread_conversation(thread_id: str, token_v2: str,
                     turn["timestamp"] = ts
                 if author:
                     turn["createdById"] = author
+                data = msg.get("data") or {}
+                if "completed" in data:
+                    turn["completed"] = bool(data.get("completed"))
+                if data.get("completed_time") is not None:
+                    turn["completedTime"] = data.get("completed_time")
                 turns.append(turn)
 
         elif step.get("type") in ("user", "human"):
@@ -235,6 +241,43 @@ def get_thread_conversation(thread_id: str, token_v2: str,
         "createdById": thread.get("created_by_id"),
         "updatedById": thread.get("updated_by_id"),
     }
+
+
+def get_agent_response_state(thread_id: str, after_msg_id: str,
+                             token_v2: str, user_id: str | None = None,
+                             space_id: str | None = None) -> dict:
+    """Inspect the latest assistant turn after a user message."""
+    conv = get_thread_conversation(thread_id, token_v2, user_id, space_id=space_id)
+    turns = conv.get("turns") or []
+
+    found_user = False
+    assistant_turns = []
+    for turn in turns:
+        turn_id = turn.get("msgId") or turn.get("id") or turn.get("messageId")
+        if turn_id == after_msg_id:
+            found_user = True
+            continue
+        if found_user and turn.get("role") in ("assistant", "agent"):
+            content = turn.get("content") or turn.get("text") or ""
+            if isinstance(content, list):
+                content = "\n".join(str(c) for c in content)
+            content = content.strip()
+            if content:
+                assistant_turns.append({**turn, "content": content})
+
+    result = {
+        "status": "pending",
+        "content": None,
+        "turns": assistant_turns,
+    }
+    if not assistant_turns:
+        return result
+
+    last = assistant_turns[-1]
+    result["content"] = last["content"]
+    if last.get("completed"):
+        result["status"] = "complete"
+    return result
 
 
 def search_threads(query: str, space_id: str, token_v2: str,
@@ -364,6 +407,36 @@ def archive_threads(thread_ids: list[str], space_id: str,
     return ordered_ids
 
 
+def unarchive_threads(thread_ids: list[str], space_id: str,
+                      token_v2: str, user_id: str | None = None,
+                      dry_run: bool = False) -> list[str]:
+    seen: set[str] = set()
+    ordered_ids = [
+        thread_id for thread_id in thread_ids
+        if thread_id and not (thread_id in seen or seen.add(thread_id))
+    ]
+    if not ordered_ids:
+        return []
+
+    ops = [{
+        "pointer": {"table": "thread", "id": thread_id, "spaceId": space_id},
+        "path": [],
+        "command": "update",
+        "args": {
+            "alive": True,
+        },
+    } for thread_id in ordered_ids]
+
+    payload = _tx(
+        space_id,
+        ops,
+        user_action="assistantChatHistoryItem.restoreInferenceChatTranscript",
+        unretryable_error_behavior="continue",
+    )
+    _post("saveTransactionsFanout", payload, token_v2, user_id, dry_run)
+    return ordered_ids
+
+
 def archive_workflow_threads(notion_internal_id: str, space_id: str,
                              token_v2: str, user_id: str | None = None,
                              limit: int = 100) -> dict:
@@ -420,6 +493,15 @@ def archive_selected_workflow_threads(thread_ids: list[str], space_id: str,
     return {
         "count": len(archived_ids),
         "threadIds": archived_ids,
+    }
+
+
+def unarchive_selected_workflow_threads(thread_ids: list[str], space_id: str,
+                                        token_v2: str, user_id: str | None = None) -> dict:
+    restored_ids = unarchive_threads(thread_ids, space_id, token_v2, user_id)
+    return {
+        "count": len(restored_ids),
+        "threadIds": restored_ids,
     }
 
 
@@ -798,45 +880,38 @@ def send_agent_message(thread_id: str, space_id: str, notion_internal_id: str, c
 
 def wait_for_agent_response(thread_id: str, after_msg_id: str,
                              token_v2: str, user_id: str | None = None,
-                             timeout: int = 120, poll_interval: int = 3) -> str | None:
-    """Poll until the agent's final response is stable.
-
-    Multi-step agents (think → tool call → answer) emit intermediate assistant
-    turns before the final one. We scan for the LAST assistant turn after the
-    user message and return it only once its content is unchanged across two
-    consecutive polls, indicating inference is complete.
-    """
+                             timeout: int = 120, poll_interval: int = 3,
+                             space_id: str | None = None) -> str | None:
+    """Poll until the latest assistant turn is marked complete."""
     deadline = time.time() + timeout
-    last_content: str | None = None
 
     while time.time() < deadline:
         time.sleep(poll_interval)
         try:
-            conv = get_thread_conversation(thread_id, token_v2, user_id)
+            state = get_agent_response_state(thread_id, after_msg_id, token_v2, user_id, space_id=space_id)
         except Exception:
             continue
-        turns = conv.get("turns") or conv.get("messages") or []
-        if not turns:
+        if state["status"] == "complete":
+            return state["content"]
+
+    return None
+
+
+def wait_for_agent_response_state(thread_id: str, after_msg_id: str,
+                                  token_v2: str, user_id: str | None = None,
+                                  timeout: int = 120, poll_interval: int = 3,
+                                  space_id: str | None = None) -> dict:
+    """Poll for completion and return a structured status payload."""
+    deadline = time.time() + timeout
+    last_state = {"status": "pending", "content": None, "turns": []}
+
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        try:
+            last_state = get_agent_response_state(thread_id, after_msg_id, token_v2, user_id, space_id=space_id)
+        except Exception:
             continue
+        if last_state["status"] == "complete":
+            return last_state
 
-        found_user = False
-        current_content: str | None = None
-        for turn in turns:
-            turn_id = turn.get("msgId") or turn.get("id") or turn.get("messageId")
-            if turn_id == after_msg_id:
-                found_user = True
-                continue
-            if found_user and turn.get("role") in ("assistant", "agent"):
-                content = turn.get("content") or turn.get("text") or ""
-                if isinstance(content, list):
-                    content = "\n".join(str(c) for c in content)
-                if content.strip():
-                    current_content = content.strip()  # keep scanning — we want the last one
-
-        if current_content is not None:
-            if current_content == last_content:
-                # Stable across two consecutive polls — inference complete
-                return current_content
-            last_content = current_content
-
-    return last_content  # return whatever we have at timeout
+    return last_state

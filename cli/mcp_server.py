@@ -37,6 +37,7 @@ from utils import _to_dashed_uuid, _name_to_key
 CFG = config.get_config()
 
 AGENTS_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.yaml")
+_SAFE_TOOL_WAIT_SECONDS = 90
 
 
 mcp = FastMCP(
@@ -419,41 +420,39 @@ def _update_agent_impl(
 
 @mcp.tool()
 @auth_retry
-def list_agents() -> str:
-    """List all registered Notion AI agents from agents.yaml."""
+def list_agents(live: bool = False) -> str:
+    """
+    List Notion AI agents.
+
+    live: If False (default), reads from agents.yaml registry.
+          If True, queries the Notion workspace directly for all agents
+          (does not require agents.yaml, returns full UUIDs).
+    """
+    if live:
+        token, user_id = _get_auth()
+        space_id = _resolve_space_id(token, user_id)
+        agents = notion_client.get_all_workspace_agents(space_id, token, user_id)
+        if not agents:
+            return "No agents found in workspace."
+        lines = []
+        for a in agents:
+            lines.append(
+                f"{a['name']}\n"
+                f"  key:         {_name_to_key(a['name'])}\n"
+                f"  notion_internal_id: {a['notion_internal_id']}\n"
+                f"  space_id:    {a['space_id']}\n"
+                f"  notion_public_id:    {a['notion_public_id']}"
+            )
+        return "\n\n".join(lines)
+
     registry = _load_registry()
     if not registry:
         return "No agents registered. Use sync_registry to auto-populate from Notion."
     lines = []
     for name, raw_cfg in registry.items():
-        wid = raw_cfg.get("notion_internal_id") or raw_cfg.get("notion_internal_id", "?")
+        wid = raw_cfg.get("notion_internal_id", "?")
         lines.append(f"- {name}: workflow={wid}")
     return "\n".join(lines)
-
-
-@mcp.tool()
-@auth_retry
-def list_workspace_agents() -> str:
-    """
-    Enumerate all AI agents in the Notion workspace directly from the API.
-    Does not require agents.yaml — queries Notion live.
-    Returns name, notion_internal_id, space_id, and notion_public_id for every agent.
-    """
-    token, user_id = _get_auth()
-    space_id = _resolve_space_id(token, user_id)
-    agents = notion_client.get_all_workspace_agents(space_id, token, user_id)
-    if not agents:
-        return "No agents found in workspace."
-    lines = []
-    for a in agents:
-        lines.append(
-            f"{a['name']}\n"
-            f"  key:         {_name_to_key(a['name'])}\n"
-            f"  notion_internal_id: {a['notion_internal_id']}\n"
-            f"  space_id:    {a['space_id']}\n"
-            f"  notion_public_id:    {a['notion_public_id']}"
-        )
-    return "\n\n".join(lines)
 
 
 @mcp.tool()
@@ -527,14 +526,23 @@ def dump_agent(agent_name: str) -> str:
 @auth_retry
 def update_agent(
     agent_name: str,
-    instructions_markdown: str,
+    instructions_markdown: str | None = None,
     publish: bool = True,
 ) -> str:
     """
-    Replace a Notion AI agent's instructions with new Markdown content.
-    Optionally publishes the agent afterward (default: True).
-    Mentions use {{page:uuid}} syntax.
+    Replace a Notion AI agent's instructions with new Markdown content,
+    then publish. Mentions use {{page:uuid}} syntax.
+
+    If instructions_markdown is None (or omitted), the agent's existing
+    instructions are left unchanged and only a publish is performed.
     """
+    if instructions_markdown is None:
+        cfg = _get_agent_config(agent_name)
+        token, user_id = _get_auth()
+        result = notion_client.publish_agent(
+            cfg["notion_internal_id"], cfg["space_id"], token, user_id,
+        )
+        return _build_publish_message(agent_name, result, standalone=True)
     return _update_agent_impl(agent_name, instructions_markdown, publish)
 
 
@@ -553,18 +561,6 @@ def update_agent_from_file(
     with open(markdown_path, encoding="utf-8") as f:
         instructions_markdown = f.read()
     return _update_agent_impl(agent_name, instructions_markdown, publish)
-
-
-@mcp.tool()
-@auth_retry
-def publish_agent(agent_name: str) -> str:
-    """Publish a Notion AI agent without changing its instructions."""
-    cfg = _get_agent_config(agent_name)
-    token, user_id = _get_auth()
-    result = notion_client.publish_agent(
-        cfg["notion_internal_id"], cfg["space_id"], token, user_id,
-    )
-    return _build_publish_message(agent_name, result, standalone=True)
 
 
 @mcp.tool()
@@ -606,51 +602,52 @@ def discover_agent(workflow_url_or_id: str) -> str:
 
 @mcp.tool()
 @auth_retry
-def register_agent(
+def manage_registry(
+    action: str,
     name: str,
-    notion_internal_id: str,
-    space_id: str,
-    notion_public_id: str,
+    notion_internal_id: str = "",
+    space_id: str = "",
+    notion_public_id: str = "",
     label: str = "",
 ) -> str:
     """
-    Register a Notion AI agent in agents.yaml.
-    All three UUIDs (notion_internal_id, space_id, notion_public_id) are required.
-    Use discover_agent first to find them.
+    Add or remove a Notion AI agent from agents.yaml.
+
+    action: "register" — add an agent (requires notion_internal_id, space_id, notion_public_id).
+            "remove"   — remove an agent by name (only name is required).
+
+    Use discover_agent first to find the three UUIDs needed for register.
     """
-    # Validate UUIDs
-    notion_internal_id = _to_dashed_uuid(notion_internal_id)
-    space_id = _to_dashed_uuid(space_id)
-    notion_public_id = _to_dashed_uuid(notion_public_id)
+    if action == "register":
+        if not (notion_internal_id and space_id and notion_public_id):
+            raise ValueError("register requires notion_internal_id, space_id, and notion_public_id.")
+        notion_internal_id = _to_dashed_uuid(notion_internal_id)
+        space_id = _to_dashed_uuid(space_id)
+        notion_public_id = _to_dashed_uuid(notion_public_id)
+        registry = _load_registry()
+        if name in registry:
+            return f"Agent '{name}' already exists. Remove it first to re-register."
+        entry: dict = {
+            "notion_internal_id": notion_internal_id,
+            "space_id": space_id,
+            "notion_public_id": notion_public_id,
+        }
+        if label:
+            entry["label"] = label
+        registry[name] = entry
+        _save_registry(registry)
+        return f"Registered agent '{name}' (workflow: {notion_internal_id})"
 
-    registry = _load_registry()
-    if name in registry:
-        return f"Agent '{name}' already exists. Remove it first to re-register."
+    if action == "remove":
+        registry = _load_registry()
+        if name not in registry:
+            available = ", ".join(sorted(registry.keys())) or "(none)"
+            return f"Agent '{name}' not found. Available: {available}"
+        del registry[name]
+        _save_registry(registry)
+        return f"Removed agent '{name}' from registry."
 
-    entry: dict = {
-        "notion_internal_id": notion_internal_id,
-        "space_id": space_id,
-        "notion_public_id": notion_public_id,
-    }
-    if label:
-        entry["label"] = label
-
-    registry[name] = entry
-    _save_registry(registry)
-    return f"Registered agent '{name}' (workflow: {notion_internal_id})"
-
-
-@mcp.tool()
-@auth_retry
-def remove_agent(name: str) -> str:
-    """Remove a Notion AI agent from agents.yaml."""
-    registry = _load_registry()
-    if name not in registry:
-        available = ", ".join(sorted(registry.keys())) or "(none)"
-        return f"Agent '{name}' not found. Available: {available}"
-    del registry[name]
-    _save_registry(registry)
-    return f"Removed agent '{name}' from registry."
+    raise ValueError(f"Unknown action '{action}'. Use 'register' or 'remove'.")
 
 
 def _resolve_thread_id(thread: str, token: str, user_id: str | None) -> str:
@@ -733,7 +730,8 @@ def _conversation_to_markdown(convo: dict) -> str:
 @mcp.tool()
 @auth_retry
 def get_conversation(thread: str, format: str = "json",
-                     since_msg_id: str | None = None) -> str:
+                     since_msg_id: str | None = None,
+                     space_id: str | None = None) -> str:
     """
     Fetch a Notion AI conversation and return its full transcript.
 
@@ -759,7 +757,9 @@ def get_conversation(thread: str, format: str = "json",
 
     token, user_id = _get_auth()
     thread_id = _resolve_thread_id(thread, token, user_id)
-    convo = notion_client.get_thread_conversation(thread_id, token, user_id)
+    convo = notion_client.get_thread_conversation(
+        thread_id, token, user_id, space_id=space_id or CFG.space_id
+    )
 
     if since_msg_id:
         turns = convo.get("turns") or []
@@ -777,59 +777,78 @@ def get_conversation(thread: str, format: str = "json",
     return json.dumps(convo, indent=2, ensure_ascii=False)
 
 
+def _build_agent_tracking_payload(thread_id: str, msg_id: str) -> dict:
+    return {
+        "check_agent_response": {
+            "thread_id": thread_id,
+            "after_msg_id": msg_id,
+            "space_id": CFG.space_id,
+        },
+        "get_conversation": {
+            "thread": thread_id,
+            "since_msg_id": msg_id,
+            "space_id": CFG.space_id,
+        },
+    }
+
+
+def _compute_effective_wait_timeout(timeout: int) -> int:
+    """Cap blocking waits so the MCP transport can still return a payload."""
+    if timeout <= 0:
+        return 0
+    return min(timeout, _SAFE_TOOL_WAIT_SECONDS)
+
+
 @mcp.tool()
 @auth_retry
 def check_agent_response(thread_id: str, after_msg_id: str,
-                         format: str = "text") -> str:
+                         format: str = "text",
+                         space_id: str | None = None,
+                         timeout: int = 0) -> str:
     """
     Non-blocking check for an agent response after a sent message.
 
     Makes a single conversation fetch and returns the latest assistant turn
-    that appears after after_msg_id, or a "pending" status if none yet.
+    that appears after after_msg_id, including partial content while inference
+    is still pending.
 
     thread_id: UUID of the thread (returned by chat_with_agent).
     after_msg_id: The message ID of the user turn (returned by chat_with_agent).
     format: "text" (default) — plain response content
             "json" — full turn object(s) as JSON
+    timeout: If > 0, poll internally for up to this many seconds before returning.
+             Eliminates the need for the caller to loop with sleep. Default: 0 (single check).
 
     Returns one of:
-      - {"status": "pending"} — inference not yet started or still running
+      - {"status": "pending", "content": "...|null"} — inference still running
       - {"status": "complete", "content": "...", "turns": [...]} — response ready
 
-    Call this repeatedly (every few seconds) until status is "complete".
     For multi-step agents, content is the final assistant turn text.
     """
     if format not in ("text", "json"):
         raise ValueError(f"format must be 'text' or 'json', got '{format}'")
 
     token, user_id = _get_auth()
-    convo = notion_client.get_thread_conversation(thread_id, token, user_id)
-    turns = convo.get("turns") or []
+    sid = space_id or CFG.space_id
 
-    found_user = False
-    assistant_turns = []
-    for turn in turns:
-        turn_id = turn.get("msgId") or turn.get("id")
-        if turn_id == after_msg_id:
-            found_user = True
-            continue
-        if found_user and turn.get("role") in ("assistant", "agent"):
-            content = turn.get("content") or turn.get("text") or ""
-            if isinstance(content, list):
-                content = "\n".join(str(c) for c in content)
-            if content.strip():
-                assistant_turns.append({**turn, "content": content.strip()})
+    if timeout > 0:
+        state = notion_client.wait_for_agent_response_state(
+            thread_id, after_msg_id, token, user_id,
+            timeout=timeout, space_id=sid,
+        )
+    else:
+        state = notion_client.get_agent_response_state(
+            thread_id, after_msg_id, token, user_id, space_id=sid,
+        )
 
-    if not assistant_turns:
-        return json.dumps({"status": "pending"})
-
-    last = assistant_turns[-1]
     result = {
-        "status": "complete",
-        "content": last["content"],
+        "status": state["status"],
+        "thread_id": thread_id,
+        "after_msg_id": after_msg_id,
+        "content": state["content"],
     }
     if format == "json":
-        result["turns"] = assistant_turns
+        result["turns"] = state["turns"]
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -837,7 +856,7 @@ def check_agent_response(thread_id: str, after_msg_id: str,
 @auth_retry
 def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None,
                     new_thread: bool = False, wait: bool = False,
-                    timeout: int = 180) -> str:
+                    timeout: int = 600) -> str:
     """
     Send a message to a Notion AI agent and trigger a response.
 
@@ -845,17 +864,17 @@ def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None,
     message: The content of the message to send.
     thread_id: Optional UUID of an existing thread to continue.
     new_thread: If true, always create a fresh thread (ignores thread_id).
-    wait: If true, poll until the agent responds and return the response text.
-    timeout: Max seconds to wait for response (default 120, only used with wait=True).
+    wait: If true, poll briefly and return either completion or a tracked pending state.
+    timeout: Requested max wait in seconds (default 600). Blocking wait is capped to
+             a transport-safe budget so the MCP call can still return a payload.
 
     If thread_id is omitted and new_thread is false, continues the most recent
     existing thread or creates one if none exist.
 
-    Returns the agent's response (if wait=True) or the message ID + thread ID.
+    Returns a JSON status envelope containing thread/message IDs, content, and
+    tracking handles for follow-up polling.
     """
-    with open(AGENTS_YAML) as f:
-        registry = yaml.safe_load(f)
-
+    registry = _load_registry()
     cfg = registry.get(agent_name)
     if not cfg:
         raise ValueError(f"Agent '{agent_name}' not found in registry.")
@@ -902,27 +921,82 @@ def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None,
         model=model_type,
     )
 
-    thread_note = " (new thread)" if created_new else ""
+    tracking = _build_agent_tracking_payload(thread_id, msg_id)
 
     if wait:
-        print(f"Waiting for agent response (timeout={timeout}s)...", file=sys.stderr)
-        response = notion_client.wait_for_agent_response(
-            thread_id, msg_id, token, user_id, timeout=timeout)
-        if response:
-            return (
-                f"**Agent response** (thread: {thread_id}{thread_note}):\n\n{response}"
-            )
-        return (
-            f"Agent did not respond within {timeout}s. Thread: {thread_id}{thread_note}.\n"
-            f"Check manually: get_conversation(thread='{thread_id}', format='md')"
+        effective_timeout = _compute_effective_wait_timeout(timeout)
+        print(
+            f"Waiting for agent response (requested={timeout}s, effective={effective_timeout}s)...",
+            file=sys.stderr,
         )
+        state = notion_client.wait_for_agent_response_state(
+            thread_id, msg_id, token, user_id,
+            timeout=effective_timeout,
+            space_id=CFG.space_id,
+        )
+        payload = {
+            "status": state["status"],
+            "agent_name": agent_name,
+            "thread_id": thread_id,
+            "message_id": msg_id,
+            "thread_created": created_new,
+            "requested_timeout_seconds": timeout,
+            "effective_timeout_seconds": effective_timeout,
+            "content": state["content"],
+            "tracking": tracking,
+        }
+        if state["status"] == "complete":
+            return json.dumps(payload, ensure_ascii=False)
+        if effective_timeout < timeout:
+            payload["note"] = (
+                f"No completed response yet after the transport-safe wait budget of "
+                f"{effective_timeout}s (requested {timeout}s). "
+                f"Call check_agent_response(timeout=120) to poll internally without sleep loops."
+            )
+        else:
+            payload["note"] = (
+                f"No completed response yet after {timeout}s. "
+                f"Call check_agent_response(timeout=120) to poll internally without sleep loops."
+            )
+        return json.dumps(payload, ensure_ascii=False)
 
-    return (
-        f"Message sent (ID: {msg_id}) to thread {thread_id}{thread_note}.\n"
-        f"Poll for the response (non-blocking, call every few seconds):\n"
-        f"  check_agent_response(thread_id='{thread_id}', after_msg_id='{msg_id}')\n"
-        f"Or fetch new turns only:\n"
-        f"  get_conversation(thread='{thread_id}', format='md', since_msg_id='{msg_id}')"
+    return json.dumps(
+        {
+            "status": "queued",
+            "agent_name": agent_name,
+            "thread_id": thread_id,
+            "message_id": msg_id,
+            "thread_created": created_new,
+            "tracking": tracking,
+            "note": "Message sent. Call check_agent_response(timeout=120) to wait for completion — it polls internally so you don't need a sleep loop.",
+        },
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def start_agent_run(
+    agent_name: str,
+    message: str,
+    thread_id: str | None = None,
+    new_thread: bool = True,
+) -> str:
+    """
+    Non-blocking entry point for slow agents.
+
+    Dispatches a message via chat_with_agent(wait=False) and returns immediately
+    with queued status plus tracking handles (thread_id, message_id) that can be
+    passed to check_agent_response for polling.
+
+    Prefer this over chat_with_agent(wait=True) when the agent is known to take
+    longer than the MCP transport budget, so the tool call itself never blocks.
+    """
+    return chat_with_agent(
+        agent_name=agent_name,
+        message=message,
+        thread_id=thread_id,
+        new_thread=new_thread,
+        wait=False,
     )
 
 
@@ -1037,20 +1111,96 @@ def _format_agent_triggers(triggers: list[dict]) -> list[str]:
 
 @mcp.tool()
 @auth_retry
-def get_agent_triggers(agent: str = "all") -> str:
+def get_triggers(
+    agent: str = "all",
+    scope: str = "agent",
+    db: str | None = None,
+) -> str:
     """
-    Show trigger configuration for Notion AI custom agents.
+    Show trigger and automation configuration.
 
-    agent: A registered agent name, or "all" for every agent in the workspace.
+    scope: "agent" (default) — show Notion AI agent triggers (@mention, schedules,
+               property-change). agent="all" returns every agent; agent="<name>"
+               returns a single registered agent.
+           "db" — show native Notion database automations. Requires db parameter.
 
-    Returns each agent's triggers: @mention, schedules (recurrence),
-    and property-change (notion.page.updated) with filter conditions.
+    db: Database page URL or UUID (required when scope="db").
 
     Includes implicit defaults: "New chat" (always on) and "@mention"
-    (shown as disabled when absent from data.triggers).
+    (shown as disabled when absent).
     """
     token, user_id = _get_auth()
 
+    if scope == "db":
+        if not db:
+            raise ValueError("scope='db' requires the db parameter (URL or UUID).")
+        url_match = re.search(r'notion\.so/(?:[^/]+/)*([0-9a-f]{32})', db)
+        raw_id = url_match.group(1) if url_match else db.strip()
+        db_page_id = _to_dashed_uuid(raw_id)
+
+        result = notion_client.get_db_automations(db_page_id, token, user_id)
+        automations = result.get("automations", [])
+        prop_map = result.get("property_map", {})
+
+        def _prop_name(pid: str) -> str:
+            return prop_map.get(pid, pid)
+
+        if not automations:
+            return f"No automations found on database {db_page_id}."
+
+        lines = [f"Found {len(automations)} automation(s) on {db_page_id}:\n"]
+        for i, a in enumerate(automations, 1):
+            enabled = a.get("enabled")
+            enabled_str = "enabled" if enabled else ("disabled" if enabled is False else "enabled (default)")
+            lines.append(f"── Automation {i}: {a['id']}  [{enabled_str}]")
+
+            trigger = a.get("trigger") or {}
+            event = trigger.get("event", {})
+            if event.get("pagePropertiesEdited"):
+                ppe = event["pagePropertiesEdited"]
+                filter_type = ppe.get("type", "all")
+                filters = ppe.get("all", []) or ppe.get("some", [])
+                filter_parts = []
+                for f in filters:
+                    filt = f.get("filter", {})
+                    op = filt.get("operator", "?")
+                    vals = filt.get("value", [])
+                    val_names = [v.get("value", v.get("id", "?")) for v in vals if isinstance(v, dict)]
+                    prop_label = _prop_name(f["property"])
+                    if val_names:
+                        filter_parts.append(f"{prop_label} {op} [{', '.join(val_names)}]")
+                    else:
+                        filter_parts.append(f"{prop_label} ({op})")
+                qualifier = f" [{filter_type}]" if filter_type != "all" else ""
+                lines.append(f"   Trigger: pagePropertiesEdited{qualifier} — {'; '.join(filter_parts)}")
+            elif event.get("pagesAdded"):
+                lines.append("   Trigger: pagesAdded")
+            else:
+                lines.append(f"   Trigger: {json.dumps(trigger)}")
+
+            actions = a.get("actions", [])
+            lines.append(f"   Actions ({len(actions)}):")
+            for act in actions:
+                lines.append(f"     [{act['type']}]  id={act['id']}")
+                config = act.get("config", {})
+                if config.get("values"):
+                    val_parts = []
+                    for pid, vdef in config["values"].items():
+                        pname = _prop_name(pid)
+                        raw = vdef.get("value", {}).get("value", "")
+                        if isinstance(raw, list) and raw:
+                            display = raw[0][0] if isinstance(raw[0], list) else str(raw[0])
+                        else:
+                            display = str(raw) if raw else "?"
+                        val_parts.append(f"{pname} ← {display}")
+                    lines.append(f"       sets: {', '.join(val_parts)}")
+                elif config:
+                    lines.append(f"       config: {json.dumps(config)[:120]}")
+            lines.append("")
+
+        return "\n".join(lines).strip()
+
+    # scope == "agent"
     if agent == "all":
         space_id = _resolve_space_id(token, user_id)
         agents = notion_client.get_all_workspace_agents(space_id, token, user_id)
@@ -1063,7 +1213,6 @@ def get_agent_triggers(agent: str = "all") -> str:
             lines.append(f"{a['name']}:\n" + "\n".join(trigger_lines))
         return "\n\n".join(lines)
 
-    # Single agent from registry
     cfg = _get_agent_config(agent)
     wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
     triggers = wf.get("data", {}).get("triggers", [])
@@ -1074,133 +1223,29 @@ def get_agent_triggers(agent: str = "all") -> str:
 
 @mcp.tool()
 @auth_retry
-def get_db_automations(db: str) -> str:
+def get_lab_topology(audit: bool = False) -> str:
     """
-    List all native automations configured on a Notion database.
+    Compile the live Lab topology and return a summary.
 
-    db: Database page URL (https://www.notion.so/...) or page UUID (dashed or dashless).
-
-    Returns each automation's trigger condition and action(s) in a readable format.
-    Uses the internal loadPageChunk API which surfaces the 'automation' and
-    'automation_action' record tables alongside block data.
-    """
-    # Extract UUID from URL or raw input
-    url_match = re.search(r'notion\.so/(?:[^/]+/)*([0-9a-f]{32})', db)
-    raw_id = url_match.group(1) if url_match else db.strip()
-    db_page_id = _to_dashed_uuid(raw_id)
-
-    token, user_id = _get_auth()
-    result = notion_client.get_db_automations(db_page_id, token, user_id)
-    automations = result.get("automations", [])
-    prop_map = result.get("property_map", {})
-
-    def _prop_name(pid: str) -> str:
-        return prop_map.get(pid, pid)
-
-    if not automations:
-        return f"No automations found on database {db_page_id}."
-
-    lines = [f"Found {len(automations)} automation(s) on {db_page_id}:\n"]
-    for i, a in enumerate(automations, 1):
-        enabled = a.get("enabled")
-        enabled_str = "enabled" if enabled else ("disabled" if enabled is False else "enabled (default)")
-        lines.append(f"── Automation {i}: {a['id']}  [{enabled_str}]")
-
-        trigger = a.get("trigger") or {}
-        event = trigger.get("event", {})
-        if event.get("pagePropertiesEdited"):
-            ppe = event["pagePropertiesEdited"]
-            filter_type = ppe.get("type", "all")
-            filters = ppe.get("all", []) or ppe.get("some", [])
-            filter_parts = []
-            for f in filters:
-                filt = f.get("filter", {})
-                op = filt.get("operator", "?")
-                vals = filt.get("value", [])
-                val_names = [v.get("value", v.get("id", "?")) for v in vals if isinstance(v, dict)]
-                prop_label = _prop_name(f["property"])
-                if val_names:
-                    filter_parts.append(f"{prop_label} {op} [{', '.join(val_names)}]")
-                else:
-                    filter_parts.append(f"{prop_label} ({op})")
-            qualifier = f" [{filter_type}]" if filter_type != "all" else ""
-            lines.append(f"   Trigger: pagePropertiesEdited{qualifier} — {'; '.join(filter_parts)}")
-        elif event.get("pagesAdded"):
-            lines.append("   Trigger: pagesAdded")
-        else:
-            lines.append(f"   Trigger: {json.dumps(trigger)}")
-
-        actions = a.get("actions", [])
-        lines.append(f"   Actions ({len(actions)}):")
-        for act in actions:
-            lines.append(f"     [{act['type']}]  id={act['id']}")
-            config = act.get("config", {})
-            if config.get("values"):
-                val_parts = []
-                for pid, vdef in config["values"].items():
-                    pname = _prop_name(pid)
-                    raw = vdef.get("value", {}).get("value", "")
-                    if isinstance(raw, list) and raw:
-                        # Notion rich-text style: [["text"]]
-                        display = raw[0][0] if isinstance(raw[0], list) else str(raw[0])
-                    else:
-                        display = str(raw) if raw else "?"
-                    val_parts.append(f"{pname} ← {display}")
-                lines.append(f"       sets: {', '.join(val_parts)}")
-            elif config:
-                lines.append(f"       config: {json.dumps(config)[:120]}")
-        lines.append("")
-
-    return "\n".join(lines).strip()
-
-
-@mcp.tool()
-@auth_retry
-def get_lab_topology() -> str:
-    """
-    Compile the live Lab topology and return a compact summary.
-
-    Uses live workflow records, triggers, automations, permissions, and the
-    repo-owned contract manifest. No cached snapshot is reused.
+    audit: If False (default), returns a compact topology summary
+           (agents, databases, triggers, permissions).
+           If True, runs drift checks and returns trigger/permission/
+           publish-state/contract findings.
     """
     token, user_id = _get_auth()
     snapshot = lab_topology.compile_snapshot(token, user_id)
+    if audit:
+        work_items_db = snapshot["indexes"]["database_by_key"].get("work_items", {})
+        recent_items, recent_error = lab_topology.fetch_recent_work_items(
+            database_id=work_items_db.get("notion_public_id")
+        )
+        report = lab_topology.evaluate_drift(
+            snapshot,
+            recent_work_items=recent_items,
+            recent_error=recent_error,
+        )
+        return lab_topology.render_drift_report(report)
     return lab_topology.render_snapshot_summary(snapshot)
-
-
-@mcp.tool()
-@auth_retry
-def audit_lab_topology() -> str:
-    """
-    Run control-plane drift checks against the live Lab topology.
-
-    Returns trigger, permission, publish-state, and contract drift findings.
-    """
-    token, user_id = _get_auth()
-    snapshot = lab_topology.compile_snapshot(token, user_id)
-    work_items_db = snapshot["indexes"]["database_by_key"].get("work_items", {})
-    recent_items, recent_error = lab_topology.fetch_recent_work_items(
-        database_id=work_items_db.get("notion_public_id")
-    )
-    report = lab_topology.evaluate_drift(
-        snapshot,
-        recent_work_items=recent_items,
-        recent_error=recent_error,
-    )
-    return lab_topology.render_drift_report(report)
-
-
-@mcp.tool()
-@auth_retry
-def trace_work_item(page_id: str) -> str:
-    """
-    Reconstruct the contract path for a single Work Item.
-
-    page_id: Work Item public UUID (dashed or dashless).
-    """
-    token, user_id = _get_auth()
-    snapshot = lab_topology.compile_snapshot(token, user_id)
-    return lab_topology.trace_work_item(page_id, snapshot)
 
 
 
@@ -1288,100 +1333,24 @@ def count_database(
         the full database to return an exact count (may make multiple API calls).
     """
     return database_tools.count_database(database_id, filter, exact)
-@auth_retry
-def get_agent_tools(agent_name: str) -> str:
-    """
-    Show the full tool/module configuration for a Notion AI agent.
-
-    Returns the agent's model, Notion page permissions (with page names),
-    MCP server connections (with enabled tools), mail, calendar, and
-    any other configured modules.
-    """
-    cfg = _get_agent_config(agent_name)
-    token, user_id = _get_auth()
-    result = notion_client.get_agent_modules(cfg["notion_internal_id"], token, user_id)
-
-    lines = [f"Agent: {cfg.get('label', agent_name)}"]
-    model = result.get("model", {})
-    lines.append(f"Model: {model.get('display', '?')} ({model.get('type', '?')})")
-    lines.append("")
-
-    for mod in result.get("modules", []):
-        mtype = mod.get("type", "?")
-        name = mod.get("name", mtype)
-
-        if mtype == "notion":
-            lines.append(f"[Notion] {name}")
-            for perm in mod.get("permissions", []):
-                scope = perm.get("scope", "?")
-                actions = ", ".join(perm.get("actions", []))
-                if scope == "workspacePublic":
-                    lines.append(f"  Workspace public pages — {actions}")
-                else:
-                    page = perm.get("pageName", perm.get("blockId", "?"))
-                    lines.append(f"  {page} — {actions}")
-
-        elif mtype == "mcpServer":
-            url = mod.get("serverUrl", "?")
-            official = mod.get("officialName", "")
-            transport = mod.get("preferredTransport", "?")
-            auto_write = mod.get("runWriteToolsAutomatically", False)
-            enabled = mod.get("enabledToolNames", [])
-            total = mod.get("totalTools", 0)
-            conn_id = mod.get("connectionId", "")
-
-            label = f"[MCP] {name}"
-            if official:
-                label += f" ({official})"
-            lines.append(label)
-            lines.append(f"  URL: {url}")
-            lines.append(f"  Transport: {transport}")
-            lines.append(f"  Auto-run writes: {auto_write}")
-            if conn_id:
-                lines.append(f"  Connection ID: {conn_id}")
-            lines.append(f"  Enabled: {len(enabled)}/{total} tools")
-
-            # List tools with enabled status
-            all_tool_names = {t["name"] for t in mod.get("tools", [])}
-            enabled_set = set(enabled)
-            for t in mod.get("tools", []):
-                status = "ON" if t["name"] in enabled_set else "off"
-                lines.append(f"    [{status}] {t['name']}: {t['title']}")
-
-        elif mtype == "mail":
-            emails = ", ".join(mod.get("emailAddresses", []))
-            scopes = ", ".join(mod.get("scopes", []))
-            lines.append(f"[Mail] {name}")
-            lines.append(f"  Addresses: {emails}")
-            lines.append(f"  Scopes: {scopes}")
-
-        elif mtype == "calendar":
-            scopes = ", ".join(mod.get("scopes", []))
-            lines.append(f"[Calendar] {name}")
-            lines.append(f"  Scopes: {scopes}")
-
-        else:
-            lines.append(f"[{mtype}] {name}")
-
-        lines.append("")
-
-    return "\n".join(lines).strip()
-
-
 @mcp.tool()
 @auth_retry
-def add_agent_mcp_server(
+def configure_agent_mcp(
+    action: str,
     agent_name: str,
     server_name: str,
-    server_url: str,
+    server_url: str = "",
     publish: bool = True,
 ) -> str:
     """
-    Add a custom MCP server to a Notion AI agent's tool configuration.
+    Add or remove a custom MCP server from a Notion AI agent's tool configuration.
+
+    action: "add"    — add a new MCP server (requires server_name and server_url).
+            "remove" — remove an existing MCP server by name (only server_name required).
 
     agent_name: Registered agent name from agents.yaml.
     server_name: Display name for the MCP server (e.g. "my-tools").
-    server_url: The MCP server URL (e.g. "https://example.com/mcp").
+    server_url: The MCP server URL (required for action="add").
     publish: Whether to publish the agent afterward (default: True).
     """
     cfg = _get_agent_config(agent_name)
@@ -1389,69 +1358,42 @@ def add_agent_mcp_server(
     wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
     modules = wf.get("data", {}).get("modules", [])
 
-    # Check for duplicate
-    for m in modules:
-        if m.get("type") == "mcpServer" and m.get("state", {}).get("serverUrl") == server_url:
-            return f"MCP server at {server_url} is already configured on {agent_name}."
-
-    import uuid as _uuid
-    new_module = {
-        "id": str(_uuid.uuid4()),
-        "name": server_name,
-        "type": "mcpServer",
-        "version": "1.0.0",
-        "state": {
-            "serverUrl": server_url,
-        },
-    }
-    modules.append(new_module)
-    notion_client.update_agent_modules(
-        cfg["notion_internal_id"], cfg["space_id"], modules, token, user_id,
-    )
-
-    msg = f"Added MCP server '{server_name}' ({server_url}) to {agent_name}."
-    if publish:
-        result = notion_client.publish_agent(
-            cfg["notion_internal_id"], cfg["space_id"], token, user_id,
+    if action == "add":
+        if not server_url:
+            raise ValueError("action='add' requires server_url.")
+        for m in modules:
+            if m.get("type") == "mcpServer" and m.get("state", {}).get("serverUrl") == server_url:
+                return f"MCP server at {server_url} is already configured on {agent_name}."
+        new_module = {
+            "id": str(uuid.uuid4()),
+            "name": server_name,
+            "type": "mcpServer",
+            "version": "1.0.0",
+            "state": {"serverUrl": server_url},
+        }
+        modules.append(new_module)
+        notion_client.update_agent_modules(
+            cfg["notion_internal_id"], cfg["space_id"], modules, token, user_id,
         )
-        msg += f" {_build_publish_message(agent_name, result)}"
-    return msg
+        msg = f"Added MCP server '{server_name}' ({server_url}) to {agent_name}."
 
+    elif action == "remove":
+        original_count = len(modules)
+        modules = [
+            m for m in modules
+            if not (m.get("type") == "mcpServer" and m.get("name") == server_name)
+        ]
+        if len(modules) == original_count:
+            mcp_names = [m.get("name") for m in modules if m.get("type") == "mcpServer"]
+            return f"No MCP server named '{server_name}' found on {agent_name}. Current: {mcp_names}"
+        notion_client.update_agent_modules(
+            cfg["notion_internal_id"], cfg["space_id"], modules, token, user_id,
+        )
+        msg = f"Removed MCP server '{server_name}' from {agent_name}."
 
-@mcp.tool()
-@auth_retry
-def remove_agent_mcp_server(
-    agent_name: str,
-    server_name: str,
-    publish: bool = True,
-) -> str:
-    """
-    Remove an MCP server from a Notion AI agent's tool configuration.
+    else:
+        raise ValueError(f"Unknown action '{action}'. Use 'add' or 'remove'.")
 
-    agent_name: Registered agent name from agents.yaml.
-    server_name: The display name of the MCP server to remove.
-    publish: Whether to publish the agent afterward (default: True).
-    """
-    cfg = _get_agent_config(agent_name)
-    token, user_id = _get_auth()
-    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
-    modules = wf.get("data", {}).get("modules", [])
-
-    original_count = len(modules)
-    modules = [
-        m for m in modules
-        if not (m.get("type") == "mcpServer" and m.get("name") == server_name)
-    ]
-
-    if len(modules) == original_count:
-        mcp_names = [m.get("name") for m in modules if m.get("type") == "mcpServer"]
-        return f"No MCP server named '{server_name}' found on {agent_name}. Current: {mcp_names}"
-
-    notion_client.update_agent_modules(
-        cfg["notion_internal_id"], cfg["space_id"], modules, token, user_id,
-    )
-
-    msg = f"Removed MCP server '{server_name}' from {agent_name}."
     if publish:
         result = notion_client.publish_agent(
             cfg["notion_internal_id"], cfg["space_id"], token, user_id,
@@ -1580,49 +1522,73 @@ def create_agent(
 
 @mcp.tool()
 @auth_retry
-def get_agent_config_raw(agent_name: str) -> str:
+def get_agent_config_raw(agent_name: str, section: str = "all") -> str:
     """
     Fetch the raw workflow record for an agent.
-    Useful for cloning tool/module configurations.
+
+    section: "all"     (default) — full workflow JSON (model, triggers, modules, data).
+             "tools"   — formatted human-readable summary of model, MCP servers,
+                         Notion permissions, mail, and calendar modules.
+             "modules" — just the raw modules array as JSON.
     """
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
     wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
+
+    if section == "modules":
+        modules = wf.get("data", {}).get("modules", [])
+        return json.dumps(modules, indent=2, ensure_ascii=False)
+
+    if section == "tools":
+        result = notion_client.get_agent_modules(cfg["notion_internal_id"], token, user_id)
+        lines = [f"Agent: {cfg.get('label', agent_name)}"]
+        model = result.get("model", {})
+        lines.append(f"Model: {model.get('display', '?')} ({model.get('type', '?')})")
+        lines.append("")
+        for mod in result.get("modules", []):
+            mtype = mod.get("type", "?")
+            name = mod.get("name", mtype)
+            if mtype == "notion":
+                lines.append(f"[Notion] {name}")
+                for perm in mod.get("permissions", []):
+                    scope = perm.get("scope", "?")
+                    actions = ", ".join(perm.get("actions", []))
+                    if scope == "workspacePublic":
+                        lines.append(f"  Workspace public pages — {actions}")
+                    else:
+                        page = perm.get("pageName", perm.get("blockId", "?"))
+                        lines.append(f"  {page} — {actions}")
+            elif mtype == "mcpServer":
+                url = mod.get("serverUrl", "?")
+                official = mod.get("officialName", "")
+                transport = mod.get("preferredTransport", "?")
+                auto_write = mod.get("runWriteToolsAutomatically", False)
+                enabled = mod.get("enabledToolNames", [])
+                total = mod.get("totalTools", 0)
+                conn_id = mod.get("connectionId", "")
+                label = f"[MCP] {name}" + (f" ({official})" if official else "")
+                lines.append(label)
+                lines.append(f"  URL: {url}  Transport: {transport}  Auto-run writes: {auto_write}")
+                if conn_id:
+                    lines.append(f"  Connection ID: {conn_id}")
+                lines.append(f"  Enabled: {len(enabled)}/{total} tools")
+                enabled_set = set(enabled)
+                for t in mod.get("tools", []):
+                    status = "ON" if t["name"] in enabled_set else "off"
+                    lines.append(f"    [{status}] {t['name']}: {t['title']}")
+            elif mtype == "mail":
+                emails = ", ".join(mod.get("emailAddresses", []))
+                scopes = ", ".join(mod.get("scopes", []))
+                lines.append(f"[Mail] {name}  Addresses: {emails}  Scopes: {scopes}")
+            elif mtype == "calendar":
+                scopes = ", ".join(mod.get("scopes", []))
+                lines.append(f"[Calendar] {name}  Scopes: {scopes}")
+            else:
+                lines.append(f"[{mtype}] {name}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
     return json.dumps(wf, indent=2, ensure_ascii=False)
-
-
-@mcp.tool()
-@auth_retry
-def set_agent_modules(
-    agent_name: str,
-    modules_json: str,
-    publish: bool = True,
-) -> str:
-    """
-    Update an agent's modules (tools and permissions) in bulk.
-
-    agent_name: Registered agent name.
-    modules_json: JSON string containing the modules array (from get_agent_config_raw).
-    publish: Whether to publish immediately.
-    """
-    modules = json.loads(modules_json)
-    if not isinstance(modules, list):
-        raise ValueError("modules_json must be a list of modules.")
-
-    cfg = _get_agent_config(agent_name)
-    token, user_id = _get_auth()
-
-    notion_client.update_agent_modules(
-        cfg["notion_internal_id"], cfg["space_id"], modules, token, user_id,
-    )
-
-    msg = f"Bulk-updated modules for {agent_name}."
-    if publish:
-        result = notion_client.publish_agent(
-            cfg["notion_internal_id"], cfg["space_id"], token, user_id,
-        )
-        msg += f" {_build_publish_message(agent_name, result)}"
-    return msg
 
 
 @mcp.tool()
@@ -1632,42 +1598,50 @@ def set_agent_config_raw(
     config_json: str,
     publish: bool = True,
     freshen_triggers: bool = True,
+    scope: str = "full",
 ) -> str:
     """
-    Update an agent's core configuration (modules, triggers, metadata) in bulk.
+    Update an agent's configuration in bulk.
 
     agent_name: Registered agent name.
-    config_json: JSON string containing the 'data' payload (from get_agent_config_raw).
+    config_json: JSON string — content depends on scope (see below).
     publish: Whether to publish immediately.
     freshen_triggers: If True (default), generate new random IDs for triggers.
-                      Highly recommended when cloning from another agent to avoid conflicts.
+                      Recommended when cloning from another agent.
+    scope: "full"    (default) — config_json is the 'data' payload from get_agent_config_raw.
+           "modules" — config_json is a modules array (from get_agent_config_raw section="modules").
     """
-    new_data = json.loads(config_json)
-    if not isinstance(new_data, dict):
-        raise ValueError("config_json must be a dictionary.")
-
-    # If the user passed the full workflow record, extract the .data part
-    if "data" in new_data and "id" in new_data:
-        new_data = new_data["data"]
-
-    if freshen_triggers and "triggers" in new_data:
-        for t in new_data["triggers"]:
-            t["id"] = str(uuid.uuid4())
-            if t.get("state", {}).get("type") == "recurrence":
-                t["state"]["scheduleId"] = str(uuid.uuid4())
-
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
 
-    ops = [{
-        "pointer": {"table": "workflow", "id": cfg["notion_internal_id"], "spaceId": cfg["space_id"]},
-        "path": ["data"],
-        "command": "update",
-        "args": new_data
-    }]
-    notion_client.send_ops(cfg["space_id"], ops, token, user_id)
+    if scope == "modules":
+        modules = json.loads(config_json)
+        if not isinstance(modules, list):
+            raise ValueError("scope='modules' requires config_json to be a JSON array.")
+        notion_client.update_agent_modules(
+            cfg["notion_internal_id"], cfg["space_id"], modules, token, user_id,
+        )
+        msg = f"Bulk-updated modules for {agent_name}."
+    else:
+        new_data = json.loads(config_json)
+        if not isinstance(new_data, dict):
+            raise ValueError("config_json must be a dictionary.")
+        if "data" in new_data and "id" in new_data:
+            new_data = new_data["data"]
+        if freshen_triggers and "triggers" in new_data:
+            for t in new_data["triggers"]:
+                t["id"] = str(uuid.uuid4())
+                if t.get("state", {}).get("type") == "recurrence":
+                    t["state"]["scheduleId"] = str(uuid.uuid4())
+        ops = [{
+            "pointer": {"table": "workflow", "id": cfg["notion_internal_id"], "spaceId": cfg["space_id"]},
+            "path": ["data"],
+            "command": "update",
+            "args": new_data
+        }]
+        notion_client.send_ops(cfg["space_id"], ops, token, user_id)
+        msg = f"Bulk-updated configuration for {agent_name}."
 
-    msg = f"Bulk-updated configuration for {agent_name}."
     if publish:
         result = notion_client.publish_agent(
             cfg["notion_internal_id"], cfg["space_id"], token, user_id,
@@ -1702,154 +1676,6 @@ def grant_resource_access(
     msg = f"Granted {role} access to {notion_public_id} for {agent_name}."
     msg += f" {_build_publish_message(agent_name, result)}"
     return msg
-
-
-# ── Claude.ai Project tools ──────────────────────────────────────────────────
-# Manage Claude.ai Projects (instructions, knowledge files) via internal web API.
-# Auth: Firefox session cookies, same pattern as Notion tools.
-
-import claude_cookie_extract
-import claude_client as _claude_client
-
-_claude_project_client = None
-
-
-def _get_claude_client() -> _claude_client.ClaudeProjectClient:
-    global _claude_project_client
-    if _claude_project_client is None:
-        cookie_header = claude_cookie_extract.get_cookie_header()
-        org_id = os.environ.get("CLAUDE_ORG_ID")
-        if not org_id:
-            from urllib.request import Request, urlopen
-            req = Request("https://claude.ai/api/organizations")
-            req.add_header("Cookie", cookie_header)
-            req.add_header("Content-Type", "application/json")
-            req.add_header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0")
-            with urlopen(req) as resp:
-                orgs = json.loads(resp.read())
-            if not orgs:
-                raise ValueError("No Claude.ai organizations found.")
-            org_id = orgs[0]["uuid"]
-        _claude_project_client = _claude_client.ClaudeProjectClient(cookie_header, org_id)
-    return _claude_project_client
-
-
-@mcp.tool()
-def claude_list_projects(limit: int = 30) -> str:
-    """List Claude.ai Projects."""
-    client = _get_claude_client()
-    projects = client.list_projects(limit=limit)
-    lines = []
-    for p in projects:
-        docs = p.get("docs_count", 0) or 0
-        lines.append(f'{p["uuid"]}  {p["name"]}  ({docs} docs)')
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def claude_list_docs(project_id: str) -> str:
-    """List knowledge files in a Claude.ai Project."""
-    client = _get_claude_client()
-    docs = client.list_docs(project_id)
-    lines = []
-    for d in docs:
-        tokens = d.get("estimated_token_count", "?")
-        lines.append(f'{d["uuid"]}  {d["file_name"]}  ({tokens} tokens)')
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def claude_get_instructions(project_id: str) -> str:
-    """Get the system prompt / instructions for a Claude.ai Project."""
-    client = _get_claude_client()
-    project = client.get_project(project_id)
-    return project.get("prompt_template", "")
-
-
-@mcp.tool()
-def claude_set_instructions(project_id: str, instructions: str) -> str:
-    """Update the system prompt / instructions for a Claude.ai Project.
-
-    Args:
-        project_id: The project UUID.
-        instructions: The full instructions text to set.
-    """
-    client = _get_claude_client()
-    client.update_project(project_id, prompt_template=instructions)
-    return f"Instructions updated for project {project_id}."
-
-
-@mcp.tool()
-def claude_upload_doc(project_id: str, file_name: str, content: str) -> str:
-    """Upload a knowledge file to a Claude.ai Project.
-
-    Args:
-        project_id: The project UUID.
-        file_name: Name for the file in the project.
-        content: The file content (text/markdown).
-    """
-    client = _get_claude_client()
-    result = client.upload_doc(project_id, file_name, content)
-    tokens = result.get("estimated_token_count", "?")
-    return f'Uploaded {file_name} → {result["uuid"]} ({tokens} tokens)'
-
-
-@mcp.tool()
-def claude_delete_doc(project_id: str, doc_uuid: str) -> str:
-    """Delete a knowledge file from a Claude.ai Project.
-
-    Args:
-        project_id: The project UUID.
-        doc_uuid: The UUID of the doc to delete (from claude_list_docs).
-    """
-    client = _get_claude_client()
-    client.delete_doc(project_id, doc_uuid)
-    return f"Deleted {doc_uuid}"
-
-
-@mcp.tool()
-def claude_sync_docs(project_id: str, files: str) -> str:
-    """Sync local files to a Claude.ai Project's knowledge base.
-
-    Replaces docs with matching filenames (delete + re-upload). Adds new ones.
-    Skips files whose content hasn't changed.
-
-    Args:
-        project_id: The project UUID.
-        files: Comma-separated list of absolute file paths to sync.
-    """
-    client = _get_claude_client()
-    remote_docs = client.list_docs(project_id)
-    remote_by_name = {d["file_name"]: d for d in remote_docs}
-
-    file_paths = [f.strip() for f in files.split(",")]
-    lines = []
-    for file_path in file_paths:
-        file_name = os.path.basename(file_path)
-        with open(file_path) as f:
-            content = f.read()
-
-        if file_name in remote_by_name:
-            remote_doc = remote_by_name[file_name]
-            if remote_doc.get("content", "").strip() == content.strip():
-                lines.append(f"  skip  {file_name} (unchanged)")
-                continue
-            client.delete_doc(project_id, remote_doc["uuid"])
-            result = client.upload_doc(project_id, file_name, content)
-            lines.append(f"  update  {file_name} → {result['uuid']}")
-        else:
-            result = client.upload_doc(project_id, file_name, content)
-            lines.append(f"  add  {file_name} → {result['uuid']}")
-
-    return "\n".join(lines)
-
-
-@mcp.tool()
-def claude_get_memory(project_id: str) -> str:
-    """Get the project memory entries for a Claude.ai Project."""
-    client = _get_claude_client()
-    memory = client.get_memory(project_id)
-    return json.dumps(memory, indent=2)
 
 
 # ── Dispatch tools (conditional) ─────────────────────────────────────────────

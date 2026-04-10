@@ -647,7 +647,7 @@ def diagnose_publish_failure(
 def publish_agent(notion_internal_id: str, space_id: str,
                   token_v2: str, user_id: str | None = None,
                   dry_run: bool = False,
-                  archive_existing: bool = True) -> dict:
+                  archive_existing: bool = False) -> dict:
     payload = {"workflowId": notion_internal_id, "spaceId": space_id}
 
     try:

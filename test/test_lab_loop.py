@@ -40,6 +40,7 @@ class LabLoopTests(unittest.TestCase):
 
     def _work_item(self, name, *, status="Done", created=None, last_edited=None,
                    dispatch_received=None, dispatch_consumed=None,
+                   lab_dispatch_requested=None,
                    librarian_received=None, librarian_consumed=None,
                    synthesis_complete=False, github_issue_url="https://github.com/org/repo/issues/1"):
         created = created or datetime(2026, 3, 8, tzinfo=timezone.utc)
@@ -53,6 +54,7 @@ class LabLoopTests(unittest.TestCase):
                 "Status": {"status": {"name": status}},
                 "Dispatch Requested Received At": {"date": {"start": dispatch_received}} if dispatch_received else {"date": None},
                 "Dispatch Requested Consumed At": {"date": {"start": dispatch_consumed}} if dispatch_consumed else {"date": None},
+                "Lab Dispatch Requested At": {"date": {"start": lab_dispatch_requested}} if lab_dispatch_requested else {"date": None},
                 "Librarian Request Received At": {"date": {"start": librarian_received}} if librarian_received else {"date": None},
                 "Librarian Request Consumed At": {"date": {"start": librarian_consumed}} if librarian_consumed else {"date": None},
                 "Synthesis Complete": {"checkbox": synthesis_complete},
@@ -80,23 +82,24 @@ class LabLoopTests(unittest.TestCase):
         self.assertEqual(counts.get("e1_info", 0), 1)
         self.assertTrue(any(v.severity == "INFO" and v.code == "E.1" for v in violations))
 
-    def test_stale_terminal_unsynthesized_counts_done_passed_and_kill(self):
+    def test_stale_terminal_unsynthesized_counts_done_and_kill(self):
+        # "Passed" is a Verdict value, not a Status, so it is not checked by
+        # the E.4 NICE-TO-HAVE rule — only "Done" and "Kill Condition Met" are.
         stale = datetime.now(timezone.utc) - timedelta(days=5)
         pages = [
             self._work_item("DONE-1", status="Done", last_edited=stale),
-            self._work_item("PASSED-1", status="Passed", last_edited=stale),
             self._work_item("KILL-1", status="Kill Condition Met", last_edited=stale),
         ]
         violations, counts = lab_auditor.check_lab_loop(
             self.client,
             pages,
             {},
-            lab_auditor.Counter({"id-DONE-1": 2, "id-PASSED-1": 2, "id-KILL-1": 2}),
+            lab_auditor.Counter({"id-DONE-1": 2, "id-KILL-1": 2}),
         )
 
         e4_nice = [v for v in violations if v.code == "E.4" and v.severity == "NICE-TO-HAVE"]
-        self.assertEqual(len(e4_nice), 3)
-        self.assertEqual(counts.get("e4_nice", 0), 3)
+        self.assertEqual(len(e4_nice), 2)
+        self.assertEqual(counts.get("e4_nice", 0), 2)
 
     def test_dispatch_invariants_follow_drra_signal(self):
         # DRRA set and DRCA set → E.1 (not cleared after consume)
@@ -119,6 +122,26 @@ class LabLoopTests(unittest.TestCase):
         self.assertEqual(counts.get("e3", 0), 0)
         self.assertEqual(counts.get("e7", 0), 0)
         self.assertTrue(any(v.code == "E.1" for v in violations))
+
+    def test_dispatch_stall_detection_follows_lab_dispatch_requested_signal(self):
+        page = self._work_item(
+            "LAB-DISPATCH-1",
+            status="Prompt Drafted",
+            lab_dispatch_requested="2026-03-31T19:18:00Z",
+            dispatch_consumed=None,
+        )
+        violations, counts = lab_auditor.check_lab_loop(
+            self.client,
+            [page],
+            {},
+            lab_auditor.Counter(),
+        )
+
+        self.assertEqual(counts.get("e7", 0), 1)
+        self.assertTrue(any(
+            v.code == "E.7" and "Lab Dispatch Requested At is set" in v.detail
+            for v in violations
+        ))
 
     def test_post_epoch_gate_applies_to_e1_and_e3(self):
         page = self._work_item(
@@ -165,6 +188,14 @@ class LabLoopTests(unittest.TestCase):
             self.assertEqual(mock_request.call_args_list[2].args[0], "POST")
             self.assertEqual(mock_request.call_args_list[2].args[1], "pages")
             self.assertEqual(mock_request.call_args_list[2].args[2]["parent"]["database_id"], github_return.CFG.audit_log_db_id)
+
+            update_props = mock_request.call_args_list[0].args[2]["properties"]
+            self.assertIn("Return Consumed At", update_props)
+            self.assertNotIn("Librarian Request Received At", update_props)
+
+            audit_props = mock_request.call_args_list[2].args[2]["properties"]
+            self.assertEqual(audit_props["To Status"]["select"]["name"], "Awaiting Intake")
+            self.assertEqual(audit_props["Transition"]["title"][0]["text"]["content"], "InProgress→Awaiting Intake")
 
 if __name__ == "__main__":
     unittest.main()

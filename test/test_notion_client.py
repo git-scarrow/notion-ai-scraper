@@ -12,6 +12,75 @@ import notion_threads  # noqa: E402
 
 
 class NotionClientTests(unittest.TestCase):
+    def test_get_agent_response_state_uses_completion_metadata(self) -> None:
+        thread_id = "thread-1"
+        with mock.patch.object(
+            notion_threads,
+            "read_records",
+            side_effect=[
+                {
+                    thread_id: {
+                        "id": thread_id,
+                        "space_id": "space-1",
+                        "messages": ["msg-user", "msg-agent"],
+                    }
+                },
+                {
+                    "msg-user": {
+                        "id": "msg-user",
+                        "step": {"type": "user", "value": [["Do the thing"]]},
+                        "created_time": 101,
+                    },
+                    "msg-agent": {
+                        "id": "msg-agent",
+                        "step": {
+                            "type": "agent-inference",
+                            "value": [{"type": "text", "content": "Finished"}],
+                        },
+                        "data": {"completed": True, "completed_time": 202},
+                        "created_time": 102,
+                    },
+                },
+            ],
+        ):
+            state = notion_client.get_agent_response_state(thread_id, "msg-user", "token", "user-1")
+
+        self.assertEqual(state["status"], "complete")
+        self.assertEqual(state["content"], "Finished")
+        self.assertTrue(state["turns"][0]["completed"])
+        self.assertEqual(state["turns"][0]["completedTime"], 202)
+
+    def test_get_thread_conversation_passes_space_id_to_thread_read(self) -> None:
+        thread_id = "thread-1"
+        with mock.patch.object(
+            notion_threads,
+            "read_records",
+            side_effect=[
+                {
+                    thread_id: {
+                        "id": thread_id,
+                        "space_id": "space-1",
+                        "messages": [],
+                    }
+                }
+            ],
+        ) as read_mock:
+            notion_client.get_thread_conversation(thread_id, "token", "user-1", space_id="space-1")
+
+        self.assertEqual(read_mock.call_args.kwargs["space_id"], "space-1")
+
+    def test_wait_for_agent_response_returns_none_when_only_partial_output_exists(self) -> None:
+        with mock.patch.object(
+            notion_threads,
+            "get_agent_response_state",
+            return_value={"status": "pending", "content": "Working", "turns": []},
+        ), mock.patch.object(notion_threads.time, "sleep", return_value=None):
+            result = notion_client.wait_for_agent_response(
+                "thread-1", "msg-user", "token", "user-1", timeout=1, poll_interval=0
+            )
+
+        self.assertIsNone(result)
+
     def test_get_thread_conversation_surfaces_trigger_system_messages(self) -> None:
         thread_id = "thread-1"
         with mock.patch.object(
@@ -256,7 +325,39 @@ class NotionClientTests(unittest.TestCase):
             },
         )
 
-    def test_publish_agent_archives_threads_after_success(self) -> None:
+    def test_unarchive_threads_uses_restore_chat_transaction_shape(self) -> None:
+        with mock.patch.object(notion_threads, "_post", return_value={}) as post_mock:
+            restored = notion_client.unarchive_threads(
+                ["thread-1", "thread-2", "thread-1"],
+                "space-1",
+                "token",
+                "user-1",
+            )
+
+        self.assertEqual(restored, ["thread-1", "thread-2"])
+        endpoint, payload, token, user_id, dry_run = post_mock.call_args.args
+        self.assertEqual(endpoint, "saveTransactionsFanout")
+        self.assertEqual(token, "token")
+        self.assertEqual(user_id, "user-1")
+        self.assertFalse(dry_run)
+        self.assertEqual(payload["unretryable_error_behavior"], "continue")
+        tx = payload["transactions"][0]
+        self.assertEqual(
+            tx["debug"]["userAction"],
+            "assistantChatHistoryItem.restoreInferenceChatTranscript",
+        )
+        self.assertEqual(
+            [op["pointer"]["id"] for op in tx["operations"]],
+            ["thread-1", "thread-2"],
+        )
+        self.assertEqual(
+            tx["operations"][0]["args"],
+            {
+                "alive": True,
+            },
+        )
+
+    def test_publish_agent_preserves_threads_by_default(self) -> None:
         with mock.patch.object(
             notion_agent_config,
             "_post",
@@ -270,8 +371,8 @@ class NotionClientTests(unittest.TestCase):
 
         self.assertEqual(result["workflowArtifactId"], "artifact-1")
         self.assertEqual(result["version"], 7)
-        self.assertEqual(result["archivedThreadCount"], 2)
-        self.assertEqual(result["archivedThreadIds"], ["thread-1", "thread-2"])
+        self.assertNotIn("archivedThreadCount", result)
+        self.assertNotIn("archivedThreadIds", result)
         post_mock.assert_called_once_with(
             "publishCustomAgentVersion",
             {"workflowId": "workflow-1", "spaceId": "space-1"},
@@ -279,6 +380,28 @@ class NotionClientTests(unittest.TestCase):
             "user-1",
             False,
         )
+        cleanup_mock.assert_not_called()
+
+    def test_publish_agent_archives_threads_when_explicitly_requested(self) -> None:
+        with mock.patch.object(
+            notion_agent_config,
+            "_post",
+            return_value={"workflowArtifactId": "artifact-1", "version": 7},
+        ), mock.patch.object(
+            notion_agent_config.notion_threads,
+            "archive_workflow_threads",
+            return_value={"count": 2, "threadIds": ["thread-1", "thread-2"], "threads": []},
+        ) as cleanup_mock:
+            result = notion_agent_config.publish_agent(
+                "workflow-1",
+                "space-1",
+                "token",
+                "user-1",
+                archive_existing=True,
+            )
+
+        self.assertEqual(result["archivedThreadCount"], 2)
+        self.assertEqual(result["archivedThreadIds"], ["thread-1", "thread-2"])
         cleanup_mock.assert_called_once_with(
             "workflow-1",
             "space-1",
@@ -312,7 +435,13 @@ class NotionClientTests(unittest.TestCase):
             "archive_workflow_threads",
             side_effect=RuntimeError("cleanup failed"),
         ):
-            result = notion_agent_config.publish_agent("workflow-1", "space-1", "token", "user-1")
+            result = notion_agent_config.publish_agent(
+                "workflow-1",
+                "space-1",
+                "token",
+                "user-1",
+                archive_existing=True,
+            )
 
         self.assertEqual(result["workflowArtifactId"], "artifact-1")
         self.assertEqual(result["threadCleanupWarning"], "cleanup failed")

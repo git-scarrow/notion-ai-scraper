@@ -2,7 +2,7 @@ dispatch_policy:
   blocking_dispatch_modes: [incubate]
   blocking_dispatch_blocks: [pre_repo_incubation, safety_hold]
   blocking_escalation_levels: [Needs Sam, Critical]
-  terminal_statuses: [Done, Passed, Kill Condition Met, Inconclusive, Closed, Blocked]
+  terminal_statuses: [Done, Kill Condition Met, Inconclusive, Closed, Blocked]
   valid_types:
     - Gauntlet
     - Measurement Track
@@ -394,7 +394,6 @@ contracts:
       Status:
         - Complete
         - Done
-        - Passed
     upstream_complete_fields:
       - Synthesis Completed At
     required_access: read_and_write

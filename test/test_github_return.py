@@ -16,4 +16,6 @@ def test_perform_return_preserves_github_issue_url() -> None:
     props = kwargs["properties"]
     assert props["Status"]["status"]["name"] == "Awaiting Intake"
     assert props["Return Received At"]["date"]["start"] == "2026-03-24T17:13:00Z"
+    assert props["Return Consumed At"]["date"]["start"] == "2026-03-24T17:13:00Z"
+    assert "Librarian Request Received At" not in props
     assert "GitHub Issue URL" not in props

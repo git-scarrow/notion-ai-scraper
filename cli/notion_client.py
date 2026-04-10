@@ -57,13 +57,17 @@ from notion_threads import (
     _clean_text,
     _extract_inference_turn,
     get_thread_conversation,
+    get_agent_response_state,
     search_threads,
     list_workflow_threads,
     archive_threads,
     archive_workflow_threads,
+    unarchive_threads,
+    unarchive_selected_workflow_threads,
     create_workflow_thread,
     send_agent_message,
     wait_for_agent_response,
+    wait_for_agent_response_state,
 )
 
 __all__ = [
@@ -84,7 +88,8 @@ __all__ = [
     "publish_agent",
     
     "_extract_rich_text", "_clean_text", "_extract_inference_turn",
-    "get_thread_conversation", "search_threads", "list_workflow_threads",
-    "archive_threads", "archive_workflow_threads", "create_workflow_thread",
-    "send_agent_message", "wait_for_agent_response",
+    "get_thread_conversation", "get_agent_response_state", "search_threads", "list_workflow_threads",
+    "archive_threads", "archive_workflow_threads", "unarchive_threads",
+    "unarchive_selected_workflow_threads", "create_workflow_thread",
+    "send_agent_message", "wait_for_agent_response", "wait_for_agent_response_state",
 ]

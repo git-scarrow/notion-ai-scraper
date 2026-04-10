@@ -30,10 +30,11 @@ except ImportError:
     from utils import _name_to_key, _to_dashed_uuid
 
 AGENTS_YAML = os.path.join(ROOT, "agents.yaml")
+AGENT_INSTRUCTIONS_DIR = os.path.join(ROOT, "agent_instructions")
 CONTRACTS_YAML = os.path.join(ROOT, "contracts", "lab_contracts.yaml")
 DEFAULT_LOOKBACK_DAYS = 14
 DEFAULT_LOOKBACK_LIMIT = 25
-TERMINAL_STATUSES = {"Done", "Passed", "Kill Condition Met", "Inconclusive", "Closed", "Blocked"}
+TERMINAL_STATUSES = {"Done", "Kill Condition Met", "Inconclusive", "Closed", "Blocked"}
 
 _ACCESS_STRENGTH = {
     "reader": 1,
@@ -109,6 +110,21 @@ def _load_registry(path: str = AGENTS_YAML) -> dict[str, dict[str, Any]]:
     with open(path) as handle:
         data = yaml.safe_load(handle) or {}
     return data if isinstance(data, dict) else {}
+
+
+def _canonical_instruction_path(agent_key: str) -> str:
+    return os.path.join(AGENT_INSTRUCTIONS_DIR, f"{agent_key}.md")
+
+
+def _instruction_source_exists(agent_key: str) -> bool:
+    return os.path.exists(_canonical_instruction_path(agent_key))
+
+
+def _is_effectively_empty_markdown(markdown: str | None) -> bool:
+    if markdown is None:
+        return True
+    normalized = markdown.strip()
+    return normalized in {"", "(No content found — block may be empty or inaccessible)", "(Empty instructions block)"}
 
 
 def load_contracts(path: str = CONTRACTS_YAML) -> list[dict[str, Any]]:
@@ -830,6 +846,9 @@ def compile_snapshot(
                 **artifact_summary,
                 "draft_runtime_config": draft_runtime_config,
                 "published_runtime_config": published_runtime_config,
+                "canonical_instruction_path": _canonical_instruction_path(key),
+                "canonical_instruction_source_present": _instruction_source_exists(key),
+                "draft_instruction_empty": _is_effectively_empty_markdown(draft_instruction_markdown),
                 "draft_instruction_hash": _stable_hash(draft_instruction_markdown),
                 "published_instruction_hash": _stable_hash(published_instruction_markdown),
                 "permissions": permissions,
@@ -1116,6 +1135,11 @@ def evaluate_drift(
         if has_enabled_property_trigger and not agent.get("published_artifact_id"):
             _add_finding(findings, "T.4", "P0", agent["label"], "active property-change trigger has no published artifact")
         elif has_enabled_property_trigger:
+            if not agent.get("canonical_instruction_source_present", True):
+                path = agent.get("canonical_instruction_path") or _canonical_instruction_path(agent["key"])
+                _add_finding(findings, "T.4", "P0", agent["label"], f"active property-change trigger has no canonical instruction source at {os.path.relpath(path, ROOT)}")
+            if agent.get("draft_instruction_empty"):
+                _add_finding(findings, "T.4", "P0", agent["label"], "active property-change trigger has empty draft instructions")
             for artifact_detail in _published_artifact_drift_details(agent):
                 _add_finding(findings, "T.4", "P0", agent["label"], artifact_detail)
     for contract in snapshot["contracts"]:
@@ -1341,7 +1365,7 @@ def evaluate_drift(
         superseded_by = item.get("Superseded By") or []
         if dispatch_mode != "incubate":
             continue
-        if status not in {"Passed", "Done", "Kill Condition Met", "Inconclusive"}:
+        if status not in {"Done", "Kill Condition Met", "Inconclusive"}:
             continue
         if disposition == "Archive":
             continue
@@ -1353,7 +1377,7 @@ def evaluate_drift(
             "T.16",
             "P0",
             subject,
-            "Passed incubation item has no Superseded By and no Disposition=Archive — incubation output is stranded",
+            "Terminal incubation item has no Superseded By and no Disposition=Archive — incubation output is stranded",
         )
 
     for item in recent_summaries:

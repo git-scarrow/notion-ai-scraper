@@ -260,7 +260,6 @@ contracts:
       - Execution Lane
       - Environment
       - Branch
-      - Lab Dispatch Requested At
     required_artifacts:
       - Synthesis Consumed At
     selector: {}
@@ -315,7 +314,6 @@ contracts:
       - Execution Lane
       - Environment
       - Branch
-      - Lab Dispatch Requested At
     required_artifacts: []
     selector:
       Routing Signal:

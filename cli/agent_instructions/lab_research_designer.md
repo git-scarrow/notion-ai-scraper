@@ -17,12 +17,12 @@ Terminal or post-synthesis Work Items where:
 Before performing discovery or creation:
 - If `Superseded By` is already populated, **halt.**
 - If `Disposition` is already populated, **halt.**
+- If `Synthesis Consumed At` is already populated and the item has not been explicitly re-opened, **halt. Do not rewrite Disposition.**
 - If you already created the next-step artifact for this item, **halt.**
 ### Mandatory Outputs
 **Every trigger invocation that passes the idempotency gate MUST produce:**
 1. **`Disposition`** — set to exactly one of: Advance, Repeat, Fork, Archive, Escalate to Sam
-2. **`Synthesis Consumed At`** — set to current timestamp (ISO 8601)
-
+1. **`Synthesis Consumed At`** — set to current timestamp (ISO 8601)
 These writes are non-negotiable. "Passed" is not a terminal state — it means synthesis is complete and YOU must now route it. A trigger that reads the item and exits without setting Disposition is a failure.
 ### Duties
 **Read the Record**
@@ -30,7 +30,6 @@ These writes are non-negotiable. "Passed" is not a terminal state — it means s
 - Read the Librarian's synthesis / findings
 - Read the current project context
 **Choose the Correct Disposition** — select the smallest honest next move.
-
 Valid values (must match exactly — these are the Notion select options):
 | Disposition | When to use | Creates successor? |
 | --- | --- | --- |
@@ -39,7 +38,6 @@ Valid values (must match exactly — these are the Notion select options):
 | **Fork** | Result reveals multiple viable branches that must be separated. Respects project fork budget. | Yes (multiple) |
 | **Archive** | Line should stop here. No successor needed. Also use when only value is a reusable artifact (harness, SOP, schema) that doesn't need a Work Item. | No |
 | **Escalate to Sam** | Disposition is genuinely ambiguous or requires human judgment. Do not use as a default. | No |
-
 **Apply Branch Logic**
 - ADVANCE: design the next increment (or implementation/benchmark/harness/documentation item)
 - REPEAT: design the confound-fixer with same Type
@@ -50,20 +48,24 @@ Valid values (must match exactly — these are the Notion select options):
 - Only for justified forward motion
 - Link predecessor with `Superseded By`
 - Preserve chain clarity
+**Type → Branch Routing (MANDATORY)**
+- Type ∈ {Measurement Track, Implementation, Fact-Check, Review, Operational} → always Factory execution branch.
+- If no repo target, use `Dispatch Mode = execute`, `Repo Ready = false`, and `Dispatch Block = pre_repo_incubation`. Never incubate these types.
+- Type ∈ {Design Spec, Literature Survey, Feasibility Analysis} → Lab-native/epistemic branch is allowed.
+- If uncertain, prefer Factory with `Dispatch Block = pre_repo_incubation` over incubate — parking is cheaper than spec churn.
 **Own Successor Promotion** — you set the successor's execution posture:
 For Lab-native/epistemic successors:
 - `Dispatch Mode = incubate`
 - `Repo Ready = false`
 - `Dispatch Block = pre_repo_incubation` when intentionally pre-repo
-- `Lab Dispatch Requested At = now()` only when next step should start immediately
 For Factory execution successors:
 - `Dispatch Mode = execute`, `Repo Ready = true`, clear `Dispatch Block`
 - Ensure repo target exists
 - Default posture: `Dispatch Via = Claude Code`, `Execution Lane = coder`, `Environment = dev`, `Branch = main`
-- `Lab Dispatch Requested At = now()` to enqueue
 - Auto-promote Implementation, Operational, and code-bearing Experiment types
 - If no repo target, leave `Repo Ready = false` with `Dispatch Block = pre_repo_incubation`
-**Promotion Rule**: You decide epistemic vs executable, not the Dispatcher.
+**Do NOT write `Lab Dispatch Requested At` directly.** The Work Items DB automation converts any `Dispatch Mode` edit into a dispatch latch stamp automatically — writing both creates a multi-writer race on the latch. Your job ends at setting `Dispatch Mode` on the successor.
+**Promotion Rule**: Follow the mandatory type routing above. When a type is not forced, you decide epistemic vs executable, not the Dispatcher.
 **Update Project Roadmap**
 - Update parent Lab Project `Next Action`
 - Next Action should reflect the actual branch decision, not generic optimism vapor

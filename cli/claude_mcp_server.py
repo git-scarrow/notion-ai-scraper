@@ -12,10 +12,12 @@ Usage:
   claude mcp add claude-projects -- python cli/claude_mcp_server.py
 """
 
+import io
 import json
 import os
 import re
 import sys
+import zipfile
 
 # Allow running from project root or cli/ directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -500,6 +502,79 @@ def claude_clone_project(project_id: str, output_dir: str) -> str:
     summary = f"Cloned project {project_id} to {output_dir}\n"
     summary += f"  {len(docs)} docs, {len(convs)} chats\n\n"
     return summary + "\n".join(log)
+
+
+@mcp.tool()
+def claude_list_skills() -> str:
+    """List all skills from claude.ai/customize/skills.
+
+    Returns id, name, creator_type (user/anthropic), enabled status, and last updated.
+    """
+    client = _get_client()
+    skills = client.list_skills()
+    lines = []
+    for s in skills:
+        creator = s.get("creator_type", "?")
+        enabled = "on" if s.get("enabled") else "off"
+        updated = s.get("updated_at", "")[:10]
+        lines.append(f'{s["id"]}  {s["name"]}  [{creator}] [{enabled}] {updated}')
+    return "\n".join(lines) if lines else "No skills found."
+
+
+@mcp.tool()
+def claude_get_skill(skill_id: str) -> str:
+    """Download and return the SKILL.md content for a skill from claude.ai.
+
+    Args:
+        skill_id: The skill ID (from claude_list_skills).
+    """
+    client = _get_client()
+    zip_bytes = client.download_skill_zip(skill_id)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        skill_files = [n for n in zf.namelist() if n.endswith("SKILL.md")]
+        if not skill_files:
+            return f"No SKILL.md found in archive. Contents: {zf.namelist()}"
+        content = zf.read(skill_files[0]).decode("utf-8")
+    return content
+
+
+@mcp.tool()
+def claude_sync_skills(output_dir: str, creator_type: str = "user") -> str:
+    """Download skills from claude.ai and write them to a local directory.
+
+    Creates one subdirectory per skill containing SKILL.md.
+
+    Args:
+        output_dir: Absolute path to destination directory (created if absent).
+        creator_type: Filter by creator — 'user' (default), 'anthropic', or 'all'.
+    """
+    client = _get_client()
+    skills = client.list_skills()
+
+    if creator_type != "all":
+        skills = [s for s in skills if s.get("creator_type") == creator_type]
+
+    os.makedirs(output_dir, exist_ok=True)
+    log = []
+    for s in skills:
+        skill_dir = os.path.join(output_dir, s["name"])
+        os.makedirs(skill_dir, exist_ok=True)
+        try:
+            zip_bytes = client.download_skill_zip(s["id"])
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                skill_files = [n for n in zf.namelist() if n.endswith("SKILL.md")]
+                if skill_files:
+                    content = zf.read(skill_files[0]).decode("utf-8")
+                    skill_path = os.path.join(skill_dir, "SKILL.md")
+                    with open(skill_path, "w") as f:
+                        f.write(content)
+                    log.append(f"  {s['name']} → {skill_dir}/SKILL.md")
+                else:
+                    log.append(f"  {s['name']} — no SKILL.md in archive")
+        except Exception as e:
+            log.append(f"  {s['name']} — ERROR: {e}")
+
+    return f"Synced {len(log)} skill(s) to {output_dir}\n\n" + "\n".join(log)
 
 
 if __name__ == "__main__":

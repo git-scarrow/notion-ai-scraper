@@ -1014,6 +1014,8 @@ def wait_for_agent_response(thread_id: str, after_msg_id: str,
         time.sleep(poll_interval)
         try:
             state = get_agent_response_state(thread_id, after_msg_id, token_v2, user_id, space_id=space_id)
+        except ValueError:
+            raise
         except Exception:
             continue
         if state["status"] == "complete":
@@ -1034,6 +1036,9 @@ def wait_for_agent_response_state(thread_id: str, after_msg_id: str,
         time.sleep(poll_interval)
         try:
             last_state = get_agent_response_state(thread_id, after_msg_id, token_v2, user_id, space_id=space_id)
+        except ValueError:
+            # Hard error (e.g. thread not found) — stop polling immediately.
+            raise
         except Exception:
             continue
         if last_state["status"] == "complete":

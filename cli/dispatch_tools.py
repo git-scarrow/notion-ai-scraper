@@ -179,13 +179,13 @@ def register(mcp, cfg):
         duration_ms: int,
         model: str,
         lane: str,
-        verdict: str = "",
-        error: str = "",
-        metrics: str = "",
-        artifacts: str = "",
-        files_changed: str = "",
-        commit_sha: str = "",
-        pr_url: str = "",
+        verdict: str | None = None,
+        error: str | None = None,
+        metrics: str | None = None,
+        artifacts: str | None = None,
+        files_changed: str | None = None,
+        commit_sha: str | None = None,
+        pr_url: str | None = None,
     ) -> str:
         """
         Ingest a final return payload from an execution plane.
@@ -213,6 +213,68 @@ def register(mcp, cfg):
         commit_sha: Optional git commit SHA.
         pr_url: Optional pull request URL.
         """
+        client = _get_notion_api_client()
+
+        parsed_metrics: dict | None = None
+        if metrics:
+            try:
+                parsed_metrics = json.loads(metrics)
+            except json.JSONDecodeError as e:
+                return f"**Invalid metrics JSON:** {e}"
+
+        parsed_artifacts: list[dict] | None = None
+        if artifacts:
+            try:
+                parsed_artifacts = json.loads(artifacts)
+            except json.JSONDecodeError as e:
+                return f"**Invalid artifacts JSON:** {e}"
+
+        parsed_files: list[str] | None = None
+        if files_changed:
+            parsed_files = [f.strip() for f in files_changed.split(",") if f.strip()]
+
+        result = dispatch.handle_final_return(
+            work_item_id=work_item_id,
+            run_id=run_id,
+            status=status,
+            summary=summary,
+            raw_output=raw_output,
+            duration_ms=duration_ms,
+            model=model,
+            lane=lane,
+            verdict=verdict or None,
+            error=error or None,
+            metrics=parsed_metrics,
+            artifacts=parsed_artifacts,
+            files_changed=parsed_files,
+            commit_sha=commit_sha or None,
+            pr_url=pr_url or None,
+            client=client,
+        )
+
+        if not result.get("ingested"):
+            if result.get("reason") == "duplicate_run_id":
+                return (
+                    f"**Duplicate run_id — already ingested.**\n\n"
+                    f"- Work Item: `{work_item_id}`\n"
+                    f"- Run ID: `{run_id}`"
+                )
+            errs = result.get("errors") or []
+            if errs:
+                error_list = "\n".join(f"- {e}" for e in errs)
+                return f"**Return validation failed** ({len(errs)} error(s)):\n\n{error_list}"
+            return f"**Return not ingested:** {json.dumps(result, indent=2)}"
+
+        return (
+            f"**Final return ingested.**\n\n"
+            f"- Work Item: [{result.get('item_name') or work_item_id}]"
+            f"(https://www.notion.so/{work_item_id.replace('-', '')})\n"
+            f"- Run ID: `{result['run_id']}`\n"
+            f"- Status: `{result['status']}`\n"
+            f"- Mapped Status: `{result['mapped_status']}`\n"
+            f"- Verdict: `{result.get('verdict') or '—'}`"
+        )
+
     @mcp.tool()
     def dispatch_scene(
         scene_name: str,

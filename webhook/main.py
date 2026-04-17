@@ -25,6 +25,7 @@ PROJECTS_DATABASE_ID = os.environ.get("NOTION_PROJECTS_DATABASE_ID") or os.envir
 WORK_ITEMS_DATABASE_ID = os.environ.get("NOTION_WORK_ITEMS_DATABASE_ID", "daeb64d4-e5a8-4a7b-b0dc-7555cbc3def6")
 AUDIT_LOG_DATABASE_ID = os.environ.get("NOTION_AUDIT_LOG_DATABASE_ID", "4621be9a-0709-443e-bee6-7e6166f76fae")
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET")
+FORGEJO_WEBHOOK_SECRET = os.environ.get("FORGEJO_WEBHOOK_SECRET")
 RETURN_TOKEN = os.environ.get("OPENCLAW_RETURN_TOKEN", "")
 NOTION_WEBHOOK_SECRET = os.environ.get("NOTION_WEBHOOK_SECRET", "")
 
@@ -76,6 +77,19 @@ def verify_signature(payload_body: bytes, signature_header: str | None):
     if not GITHUB_WEBHOOK_SECRET: return
     if not signature_header: raise HTTPException(status_code=401, detail="X-Hub-Signature-256 missing")
     expected = "sha256=" + hmac.new(GITHUB_WEBHOOK_SECRET.encode(), msg=payload_body, digestmod=hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature_header): raise HTTPException(status_code=401, detail="Invalid signature")
+
+
+def verify_gitea_signature(payload_body: bytes, signature_header: str | None):
+    """Verify Forgejo/Gitea webhook HMAC.
+
+    Gitea sends the raw hex digest in X-Gitea-Signature (no "sha256=" prefix),
+    unlike GitHub's X-Hub-Signature-256 which does. Forgejo preserves the Gitea
+    header for compatibility.
+    """
+    if not FORGEJO_WEBHOOK_SECRET: return
+    if not signature_header: raise HTTPException(status_code=401, detail="X-Gitea-Signature missing")
+    expected = hmac.new(FORGEJO_WEBHOOK_SECRET.encode(), msg=payload_body, digestmod=hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, signature_header): raise HTTPException(status_code=401, detail="Invalid signature")
 
 def _find_page_by_url(database_id: str, property_name: str, url: str) -> dict | None:
@@ -167,11 +181,21 @@ def _execute_return_protocol(project_id: str, nexus_url: str):
     }
     _notion_request("PATCH", update_url, json=update_payload)
 
-def _handle_issue_closed(issue_url: str, issue_number: int, sender: str):
-    """Background task: process a closed issue and update Notion."""
+def _handle_issue_closed(
+    issue_url: str,
+    issue_number: int,
+    sender: str,
+    url_property: str = "GitHub Issue URL",
+):
+    """Background task: process a closed issue and update Notion.
+
+    url_property selects which Work Items URL column to match — defaults
+    to the GitHub column for backward compatibility; the forgejo webhook
+    passes "Forgejo Issue URL" instead.
+    """
     summary = f"Issue #{issue_number} closed by {sender}."
     try:
-        work_item = _find_page_by_url(WORK_ITEMS_DATABASE_ID, "GitHub Issue URL", issue_url)
+        work_item = _find_page_by_url(WORK_ITEMS_DATABASE_ID, url_property, issue_url)
         if not work_item:
             logger.info("No Work Item found for %s — skipping", issue_url)
             return
@@ -188,10 +212,14 @@ def _handle_issue_closed(issue_url: str, issue_number: int, sender: str):
     except Exception as e:
         logger.error("_handle_issue_closed failed for %s: %s", issue_url, e)
 
-def _handle_issue_reopened(issue_url: str, issue_number: int):
-    """Background task: reset Work Item to In Progress when a GH issue is reopened."""
+def _handle_issue_reopened(
+    issue_url: str,
+    issue_number: int,
+    url_property: str = "GitHub Issue URL",
+):
+    """Background task: reset Work Item to In Progress when an issue is reopened."""
     try:
-        work_item = _find_page_by_url(WORK_ITEMS_DATABASE_ID, "GitHub Issue URL", issue_url)
+        work_item = _find_page_by_url(WORK_ITEMS_DATABASE_ID, url_property, issue_url)
         if not work_item:
             logger.info("No Work Item found for reopened issue %s — skipping", issue_url)
             return
@@ -225,8 +253,22 @@ def _handle_issue_reopened(issue_url: str, issue_number: int):
     except Exception as e:
         logger.error("_handle_issue_reopened failed for %s: %s", issue_url, e)
 
-def _handle_pr_merged(pr_url: str, pr_body: str, repo_url: str):
-    """Background task: process a merged PR and update linked Notion Work Items."""
+def _handle_pr_merged(
+    pr_url: str,
+    pr_body: str,
+    repo_url: str,
+    url_property: str = "GitHub Issue URL",
+    project_url_property: str | None = "Active GitHub Issue",
+):
+    """Background task: process a merged PR and update linked Notion Work Items.
+
+    url_property selects the Work Items URL column so the same handler serves
+    both GitHub and Forgejo. project_url_property is the Projects DB URL
+    column used for the Return Protocol project-lock release; pass None to
+    skip that step (Forgejo path, since Projects DB has no forgejo sibling).
+    `closes #N` short-refs match against repo_url, which is the forge-native
+    repository URL from the webhook payload — no host-specific regex needed.
+    """
     linked_issue_urls = []
     for m in RE_ISSUE_LINK.findall(pr_body):
         issue_num, full_url, url_num = m
@@ -241,7 +283,7 @@ def _handle_pr_merged(pr_url: str, pr_body: str, repo_url: str):
 
     for nexus_url in linked_issue_urls:
         try:
-            work_item = _find_page_by_url(WORK_ITEMS_DATABASE_ID, "GitHub Issue URL", nexus_url)
+            work_item = _find_page_by_url(WORK_ITEMS_DATABASE_ID, url_property, nexus_url)
             project_id = None
             if work_item:
                 from_status = _get_status_name(work_item)
@@ -249,8 +291,8 @@ def _handle_pr_merged(pr_url: str, pr_body: str, repo_url: str):
                 project_rel = work_item["properties"].get("Project", {}).get("relation", [])
                 if project_rel:
                     project_id = project_rel[0]["id"]
-            if not project_id and PROJECTS_DATABASE_ID:
-                project_page = _find_page_by_url(PROJECTS_DATABASE_ID, "Active GitHub Issue", nexus_url)
+            if not project_id and PROJECTS_DATABASE_ID and project_url_property:
+                project_page = _find_page_by_url(PROJECTS_DATABASE_ID, project_url_property, nexus_url)
                 if project_page:
                     project_id = project_page["id"]
             if project_id:
@@ -304,6 +346,76 @@ async def github_webhook(
             pr["html_url"],
             pr.get("body") or "",
             payload["repository"]["html_url"],
+        )
+        return {"status": "accepted", "action": "pr_merge_queued"}
+
+    return {"status": "ignored", "reason": "event_not_handled"}
+
+
+# ──────────────────────────────────────────────────────────
+# Forgejo / Gitea webhook endpoint
+#
+# Forgejo webhook payloads are Gitea-compatible and share ~95% of their
+# shape with GitHub for `issues` and `pull_request` events. Only the
+# signature header (X-Gitea-Signature, bare hex) and the Work Items
+# URL column (Forgejo Issue URL vs GitHub Issue URL) differ.
+# ──────────────────────────────────────────────────────────
+
+@app.post("/forgejo-webhook")
+async def forgejo_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_gitea_event: str = Header(None),
+    x_gitea_signature: str = Header(None),
+):
+    payload_body = await request.body()
+    verify_gitea_signature(payload_body, x_gitea_signature)
+    payload = await request.json()
+    event = x_gitea_event or request.headers.get("X-Gitea-Event", "") or request.headers.get("X-Forgejo-Event", "")
+    action = payload.get("action", "")
+
+    logger.info("Received forgejo event=%s action=%s", event, action)
+
+    # 1. HANDLE ISSUES
+    if event == "issues":
+        issue = payload["issue"]
+        url = issue["html_url"]
+
+        if action == "opened":
+            logger.info("Forgejo issue opened %s — no stub created (Lab is Notion-first)", url)
+            return {"status": "ignored", "reason": "stubs_disabled"}
+
+        if action == "closed":
+            background_tasks.add_task(
+                _handle_issue_closed,
+                url,
+                issue["number"],
+                payload["sender"]["login"],
+                "Forgejo Issue URL",
+            )
+            return {"status": "accepted", "action": "return_queued"}
+
+        if action == "reopened":
+            background_tasks.add_task(
+                _handle_issue_reopened,
+                url,
+                issue["number"],
+                "Forgejo Issue URL",
+            )
+            return {"status": "accepted", "action": "reopen_queued"}
+
+    # 2. HANDLE MERGED PRs
+    if event == "pull_request" and action == "closed":
+        pr = payload["pull_request"]
+        if not pr.get("merged"):
+            return {"status": "ignored", "reason": "PR closed without merge"}
+        background_tasks.add_task(
+            _handle_pr_merged,
+            pr["html_url"],
+            pr.get("body") or "",
+            payload["repository"]["html_url"],
+            "Forgejo Issue URL",
+            None,
         )
         return {"status": "accepted", "action": "pr_merge_queued"}
 

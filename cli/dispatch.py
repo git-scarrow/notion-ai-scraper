@@ -1171,6 +1171,45 @@ def handle_final_return(
     }
 
 
+def direct_closeout_return(
+    work_item_id: str,
+    summary: str,
+    raw_output: str = "",
+    status: str = "ok",
+    verdict: str | None = "OBSERVATIONS",
+    error: str | None = None,
+    model: str = "codex-direct",
+    lane: str = "direct-closeout",
+    run_id: str | None = None,
+    client: notion_api.NotionAPIClient | None = None,
+) -> dict[str, Any]:
+    """Fallback return path for Lab-native or MCP-wrapper-failed closeout.
+
+    This deliberately avoids requiring a dispatch packet. It writes through the
+    same direct Notion API return ingestion path with a generated idempotency key,
+    so the Work Item body and return timestamps still look like normal returns.
+    """
+    generated_run_id = run_id or f"direct-closeout-{uuid.uuid4()}"
+    return handle_final_return(
+        work_item_id=work_item_id,
+        run_id=generated_run_id,
+        status=status,
+        summary=summary,
+        raw_output=raw_output,
+        duration_ms=0,
+        model=model,
+        lane=lane,
+        verdict=verdict,
+        error=error,
+        metrics=None,
+        artifacts=None,
+        files_changed=None,
+        commit_sha=None,
+        pr_url=None,
+        client=client,
+    )
+
+
 # ── Writers-Room Scene Dispatch ──────────────────────────────────────────────
 
 # Routing table: task_type -> which entry signal to stamp

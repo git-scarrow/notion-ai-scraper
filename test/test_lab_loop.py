@@ -195,7 +195,10 @@ class LabLoopTests(unittest.TestCase):
 
             audit_props = mock_request.call_args_list[2].args[2]["properties"]
             self.assertEqual(audit_props["To Status"]["select"]["name"], "Awaiting Intake")
-            self.assertEqual(audit_props["Transition"]["title"][0]["text"]["content"], "InProgress→Awaiting Intake")
+            self.assertEqual(
+                audit_props["Transition"]["title"][0]["text"]["content"],
+                "InProgress→Awaiting Intake [evidence:close_state_only]",
+            )
 
 if __name__ == "__main__":
     unittest.main()

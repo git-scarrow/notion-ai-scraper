@@ -213,6 +213,121 @@ def register(mcp, cfg):
         commit_sha: Optional git commit SHA.
         pr_url: Optional pull request URL.
         """
+        def parse_json_arg(value: str, expected_type: type, name: str):
+            if not value:
+                return None
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{name} must be valid JSON: {exc}") from exc
+            if not isinstance(parsed, expected_type):
+                raise ValueError(f"{name} must decode to {expected_type.__name__}")
+            return parsed
+
+        try:
+            metrics_obj = parse_json_arg(metrics, dict, "metrics")
+            artifacts_obj = parse_json_arg(artifacts, list, "artifacts")
+            files_changed_list = [
+                path.strip() for path in files_changed.split(",") if path.strip()
+            ] if files_changed else None
+
+            client = _get_notion_api_client()
+            result = dispatch.handle_final_return(
+                work_item_id=work_item_id,
+                run_id=run_id,
+                status=status,
+                summary=summary,
+                raw_output=raw_output,
+                duration_ms=duration_ms,
+                model=model,
+                lane=lane,
+                verdict=verdict or None,
+                error=error or None,
+                metrics=metrics_obj,
+                artifacts=artifacts_obj,
+                files_changed=files_changed_list,
+                commit_sha=commit_sha or None,
+                pr_url=pr_url or None,
+                client=client,
+            )
+        except Exception as exc:
+            return f"**Final return failed.**\n\n`{type(exc).__name__}: {exc}`"
+
+        if not result.get("ingested"):
+            return f"**Final return not ingested.**\n\n```json\n{json.dumps(result, indent=2)}\n```"
+
+        return (
+            "**Return ingested.**\n\n"
+            f"- Work Item: `{result['work_item_id']}`\n"
+            f"- Item: {result.get('item_name') or '—'}\n"
+            f"- Run ID: `{result['run_id']}`\n"
+            f"- Return Status: `{result['status']}`\n"
+            f"- Verdict: `{result.get('verdict') or '—'}`\n"
+            f"- Mapped Status: `{result.get('mapped_status') or '—'}`\n"
+            "- Intake Clerk trigger: Return Received At stamped."
+        )
+
+    @mcp.tool()
+    def direct_closeout_return(
+        work_item_id: str,
+        summary: str,
+        raw_output: str = "",
+        status: str = "ok",
+        verdict: str = "OBSERVATIONS",
+        error: str = "",
+        model: str = "codex-direct",
+        lane: str = "direct-closeout",
+        run_id: str = "",
+    ) -> str:
+        """
+        Fallback return path for Lab-native or partially failed dispatch closeout.
+
+        Use when handle_final_return cannot be trusted, no GitHub Issue exists,
+        or no dispatch packet/run_id is available. Appends findings directly to
+        the Work Item body, stamps Return Received At / Return Consumed At, and
+        relies on the normal Intake Clerk trigger to continue the pipeline.
+
+        work_item_id: UUID of the Work Item page.
+        summary: Brief completion summary.
+        raw_output: Full findings or logs to preserve on the Work Item body.
+        status: ok, error, gated, or timeout.
+        verdict: PASS, FAIL, INCONCLUSIVE, or OBSERVATIONS when status=ok.
+        error: Required when status is not ok.
+        model: Model/tooling that produced the closeout.
+        lane: Execution lane label for the artifact.
+        run_id: Optional idempotency key; generated if omitted.
+        """
+        try:
+            client = _get_notion_api_client()
+            result = dispatch.direct_closeout_return(
+                work_item_id=work_item_id,
+                summary=summary,
+                raw_output=raw_output,
+                status=status,
+                verdict=verdict or None,
+                error=error or None,
+                model=model,
+                lane=lane,
+                run_id=run_id or None,
+                client=client,
+            )
+        except Exception as exc:
+            return f"**Direct closeout failed.**\n\n`{type(exc).__name__}: {exc}`"
+
+        if not result.get("ingested"):
+            return f"**Direct closeout not ingested.**\n\n```json\n{json.dumps(result, indent=2)}\n```"
+
+        return (
+            "**Direct closeout return ingested.**\n\n"
+            f"- Work Item: `{result['work_item_id']}`\n"
+            f"- Item: {result.get('item_name') or '—'}\n"
+            f"- Run ID: `{result['run_id']}`\n"
+            f"- Return Status: `{result['status']}`\n"
+            f"- Verdict: `{result.get('verdict') or '—'}`\n"
+            f"- Mapped Status: `{result.get('mapped_status') or '—'}`\n"
+            "- Fallback mode: direct Notion API closeout."
+        )
+
     @mcp.tool()
     def dispatch_scene(
         scene_name: str,
@@ -271,4 +386,3 @@ def register(mcp, cfg):
             f"- Entry Signal: `{result['entry_signal']}` stamped at {result['stamped_at']}\n"
             f"- Pipeline will fire automatically via Notion triggers."
         )
-

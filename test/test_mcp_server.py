@@ -25,7 +25,7 @@ class MCPServerTests(unittest.TestCase):
             wait=False,
         )
 
-    def test_chat_with_agent_wait_timeout_returns_tracking_payload(self) -> None:
+    def test_chat_with_agent_wait_pending_content_returns_consumable_payload(self) -> None:
         with mock.patch.object(mcp_server, "_load_registry", return_value={
             "librarian": {
                 "notion_internal_id": "wf-1",
@@ -56,10 +56,13 @@ class MCPServerTests(unittest.TestCase):
                 mcp_server.chat_with_agent("librarian", "Hello", wait=True, timeout=30)
             )
 
-        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["notion_status"], "pending")
+        self.assertTrue(result["completion_inferred"])
         self.assertEqual(result["thread_id"], "thread-1")
         self.assertEqual(result["message_id"], "msg-1")
         self.assertEqual(result["content"], "Still working")
+        self.assertIn("non-empty assistant content", result["note"])
         self.assertEqual(result["requested_timeout_seconds"], 30)
         self.assertEqual(result["effective_timeout_seconds"], 30)
         self.assertEqual(

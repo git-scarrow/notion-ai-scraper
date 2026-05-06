@@ -1020,20 +1020,36 @@ def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None,
         state = notion_client.wait_for_agent_response_state(
             thread_id, msg_id, token, user_id,
             timeout=effective_timeout,
-            space_id=CFG.space_id,
+            space_id=cfg['space_id'],
         )
+        status = state["status"]
+        content = state["content"]
+        inferred_complete = False
+        if status == "pending" and content:
+            # Notion can leave agent turns marked pending after a complete text
+            # answer is already materialized. Return a consumable envelope so
+            # callers do not treat fast agents such as lab_query as down.
+            status = "complete"
+            inferred_complete = True
         payload = {
-            "status": state["status"],
+            "status": status,
+            "notion_status": state["status"],
             "agent_name": agent_name,
             "thread_id": thread_id,
             "message_id": msg_id,
             "thread_created": created_new,
             "requested_timeout_seconds": timeout,
             "effective_timeout_seconds": effective_timeout,
-            "content": state["content"],
+            "content": content,
             "tracking": tracking,
         }
-        if state["status"] == "complete":
+        if inferred_complete:
+            payload["completion_inferred"] = True
+            payload["note"] = (
+                "Notion still reported the turn as pending, but non-empty "
+                "assistant content was available and is returned as complete."
+            )
+        if status == "complete":
             return json.dumps(payload, ensure_ascii=False)
         if effective_timeout < timeout:
             payload["note"] = (

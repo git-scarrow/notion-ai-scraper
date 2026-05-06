@@ -65,9 +65,20 @@ NOTION_TOKEN=<token> python3 cli/lab_auditor.py
 4. `Dispatch Via` change triggers the **Prompt Architect**.
 
 ### Trigger Chain: Return
-1. `github_return.py` sets Work Item Status = Done, LR = true, Run Date, Return Consumed At.
-2. Status = Done triggers the **Return Protocol Agent**, which clears `Active GitHub Issue` on the parent Lab Project.
-3. LR = true triggers the **Lab Librarian**, which synthesizes findings.
+1. `github_return.py` moves the Work Item to `Awaiting Intake`, stamps `Return Consumed At`, appends the closeout body, and writes a Lab Audit Log transition tagged by evidence quality, e.g. `InProgress→Awaiting Intake [evidence:close_state_only]`.
+2. `handle_final_return` is the normal dispatch return path for execution planes with a dispatch packet/run ID. It validates the return, maps verdicts to Work Item status/verdict, stamps both `Return Received At` and `Return Consumed At`, appends result blocks, and writes an audit entry.
+3. `direct_closeout_return` is the fallback MCP path when no GitHub issue, dispatch packet, or trusted run ID exists. It generates an idempotency key if needed and writes through the same direct Notion API return ingestion path.
+4. `Return Received At` is the **Lab Intake Clerk** trigger and the canonical boundary for returned work, including lag windows where Status has not yet advanced from `In Progress`.
+5. The Intake Clerk owns downstream synthesis handoff after return ingestion.
+
+### Return Evidence Tags
+
+GitHub closeout audit transitions include an evidence tag:
+
+| Tag | Meaning |
+|---|---|
+| `[evidence:full]` | The closeout had full GitHub return evidence, such as issue/PR comments. |
+| `[evidence:close_state_only]` | Only the close state was available; the system still records the return and sends the item to intake. |
 
 ## 5. Domain Boundaries (Lab vs. Factory)
 *   **The Lab (Notion)**: The domain of **Epistemic Uncertainty**. Holds Work Items, Specs, and Findings.
@@ -106,3 +117,4 @@ The `cli/notion_api.py` client uses the official Notion Databases API and requir
 *   **404 Not Found**: The database has not been **Shared** with the integration in the Notion UI.
 *   **P0: E.7 Error**: An agent skipped the consume-first step. Check the agent's instructions to ensure it uses the `atomic_consume` flow.
 *   **E.2 Dangling Pointer**: The Return Protocol Agent failed to clear `Active GitHub Issue` on the Lab Project after all Work Items reached terminal state.
+*   **Returned but still In Progress**: Check `Return Received At`, not only `Status`. A stamped `Return Received At` means the return was ingested and the Intake Clerk trigger boundary has been crossed.

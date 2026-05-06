@@ -18,8 +18,9 @@ The original chat exporter is still here: it captures live and historical Notion
 - **High-fidelity transcripts** — tool calls, model info, thread titles, mentions, and conversation metadata
 - **Custom agent management** — read, update, create, publish, and grant access for Notion AI agents
 - **MCP server** — expose Notion agent, database, dispatch, and Claude Project operations to external agent clients
+- **Compressed Lab querying** — delegate broad Notion questions to `lab_query`, a MiniMax M2.5 query agent that returns canonical answers without flooding context with raw database JSON
 - **Operational dashboard** — inspect Notion databases and aggregate workflow state from a local web UI
-- **Lab dispatch plane** — validate gates, build dispatch packets, track final returns, and reconcile workflow state
+- **Lab dispatch plane** — validate gates, build dispatch packets, ingest normal and fallback returns, and reconcile workflow state
 - **Claude.ai Project sync** — list, read, upload, delete, and sync Claude Project instructions and documents
 - **Multiple delivery surfaces** — Firefox extension, Tampermonkey userscript, Python CLI, MCP tools, and local dashboard
 
@@ -34,7 +35,7 @@ The original chat exporter is still here: it captures live and historical Notion
 | `cli/mcp_server.py` | MCP server for Notion agents, databases, dispatch workflows, and Claude Project operations |
 | `cli/update_agent.py`, `cli/create_agent.py` | CLI tools for custom Notion agent instruction and publish workflows |
 | `cli/dashboard_server.py`, `dashboard/` | Local dashboard for Notion database inspection and aggregation |
-| `cli/dispatch.py`, `cli/contracts/` | Dispatch contract builder, validation gates, schemas, and return handling |
+| `cli/dispatch.py`, `cli/dispatch_tools.py`, `cli/contracts/` | Dispatch contract builder, validation gates, schemas, MCP tools, and return handling |
 | `cli/claude_cli.py`, `cli/claude_client.py` | Claude.ai Project instruction/document sync |
 
 ---
@@ -92,6 +93,22 @@ cli/.venv/bin/python cli/dashboard_server.py --port 8099
 # Use the Claude Project sync CLI
 cli/.venv/bin/python cli/claude_cli.py --help
 ```
+
+For broad Lab questions, prefer the `lab_query` agent through the `notion-agents`
+MCP server instead of pulling large raw database payloads into context. It runs on
+MiniMax M2.5 (`fireworks-minimax-m2.5`) and should preserve canonical answer
+sets while compressing output. Exact count answers must state their scope; the
+current smoke check is:
+
+```text
+Work Items: 581 total; Dispatch Ready: 22.
+```
+
+The dispatch return path has two MCP surfaces: `handle_final_return` for normal
+execution-plane returns with a dispatch packet/run ID, and `direct_closeout_return`
+for fallback closeout when no GitHub issue or trusted dispatch packet exists. Both
+stamp `Return Received At` / `Return Consumed At` and append result blocks so the
+Intake Clerk can continue the pipeline.
 
 See [cli/README.md](cli/README.md), [CLAUDE.md](CLAUDE.md), and [docs/LAB_LOOP_V1_PROTOCOL.md](docs/LAB_LOOP_V1_PROTOCOL.md) for the operational tooling.
 

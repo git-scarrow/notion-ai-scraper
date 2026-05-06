@@ -1,6 +1,6 @@
 # notion-forge
 
-Firefox extension + Tampermonkey script + Python CLI + MCP server for capturing and managing Notion AI chat conversations, agent instructions, and Claude.ai Projects.
+Firefox extension + Tampermonkey script + Python CLI + MCP server for capturing and managing Notion AI conversations, custom Notion agents, Notion-backed Lab workflows, and Claude.ai Projects.
 
 ## Environment
 
@@ -40,14 +40,30 @@ cli/.venv/bin/python -c "import sys; sys.path.insert(0,'cli'); import notion_cli
 
 - Entry: `cli/mcp_server.py`, registered in `.mcp.json`
 - Server name: `notion-agents`
-- Tools: `list_agents`, `list_workspace_agents`, `sync_registry`, `dump_agent`, `update_agent`, `publish_agent`, `discover_agent`, `register_agent`, `remove_agent`, `create_agent`, `get_agent_tools`, `add_agent_mcp_server`, `remove_agent_mcp_server`, `set_agent_model`, `grant_resource_access`, `chat_with_agent`, `start_agent_run`, `check_agent_response`, `get_conversation`, `describe_database`, `query_database`, `count_database`, `get_agent_triggers`, `get_db_automations`, `check_gates`, `get_dispatchable_items`, `build_dispatch_packet`, `stamp_dispatch_consumed`, `handle_final_return`, `direct_closeout_return`, `claude_list_projects`, `claude_list_docs`, `claude_get_instructions`, `claude_set_instructions`, `claude_upload_doc`, `claude_delete_doc`, `claude_sync_docs`, `claude_get_memory`
+- Tools include agent registry/config/publish operations, agent chat polling, database describe/query/count operations, Lab dispatch/return tools, scene dispatch, and Claude Project sync tools. Use the MCP tool list as the live source of truth when signatures matter.
 - `describe_database(database_id)` returns the schema (property names, types, select/status options). **Always call this before `query_database` if you don't know the exact property names and types.** The filter type key in `query_database` must match the property's actual type (e.g. `status` not `select` for status-type properties). `query_database` auto-corrects common mismatches, but `describe_database` prevents them entirely.
+- For exact counts, use `count_database(..., exact=True)` or Lab Query. Do not infer totals from a limited `query_database` page, view, or search result.
 - `chat_with_agent(agent_name, message, wait=True)` sends a message and returns a JSON status envelope with `thread_id`, `message_id`, `content`, and follow-up tracking handles. Its blocking wait is capped to a transport-safe budget, so long-running agents return `status:"pending"` before the MCP tool call itself times out.
 - `start_agent_run(agent_name, message, new_thread=True)` is the preferred entry point for slow agents. It dispatches immediately and returns queued status plus the same tracking handles you can pass to `check_agent_response`.
 - `create_agent(name, space_id)` creates a new agent programmatically (workflow + instruction page + sidebar + initial publish).
 - `update_agent` auto-grants `reader` access for any `{{page:uuid}}` mentions in instructions before publish. Pre-publish validation warns on unresolvable pages.
 - `sync_registry` auto-populates `cli/agents.yaml` from the live workspace (additive-only, safe to re-run). Also syncs to `agent-env/template-data.json` for skill rendering.
 - See `~/.agents/skills/notion-agent-mcp/SKILL.md` for full API reference
+
+## Lab Query
+
+- `lab_query` is the preferred compressed read surface for broad Notion questions. Treat it like an Exa-style query agent for the Lab workspace: ask a natural-language question and get a compact answer without loading large database JSON into context.
+- Live model: MiniMax M2.5 (`fireworks-minimax-m2.5`).
+- Canonicality contract: compressed answers must preserve the answer set. Counts and distributions must state scope (`exact total`, `matched count`, `scanned count`, or `limit`) and must not call a view/search subset a database total.
+- Known-good smoke check: `chat_with_agent(lab_query, "In Work Items, how many total rows are there, and how many have Status = Dispatch Ready? Use exact counts. Return one sentence only.", new_thread=True, wait=True)` should return `Work Items: 581 total; Dispatch Ready: 22.`
+- Live configuration should show `Lab Control Plane (Notion API)` with `Enabled: 22/22 tools`, including `API-query-data-source`, `API-retrieve-a-data-source`, and `API-retrieve-a-database`.
+
+## Dispatch Returns
+
+- `handle_final_return` is the normal execution-plane return path. It validates return payloads, checks idempotency by `run_id`, maps verdicts to Work Item status/verdict, stamps `Return Received At` and `Return Consumed At`, appends result blocks, and writes an audit entry.
+- `Return Received At` is the Intake Clerk trigger and the structural boundary for "returned but still In Progress" lag windows.
+- `direct_closeout_return` is the fallback closeout path when no GitHub issue, dispatch packet, or trusted `run_id` is available. It generates an idempotency key if needed and writes through the same direct Notion API return ingestion path.
+- `github_return.py` now moves GitHub closeout to `Awaiting Intake` and tags the audit transition by evidence quality, e.g. `InProgress→Awaiting Intake [evidence:close_state_only]`.
 
 ## ID Duality & Tool Compatibility
 
@@ -73,7 +89,7 @@ Notion databases have two distinct UUIDs. Using the wrong one will result in a 4
 
 | File | Purpose |
 |---|---|
-| `cli/mcp_server.py` | MCP server (27 tools) |
+| `cli/mcp_server.py` | MCP server for Notion agents, databases, dispatch, and Claude Project sync |
 | `cli/dashboard_server.py` | HTTP dashboard server (Starlette + uvicorn, port 8099) |
 | `dashboard/index.html` | Dashboard shell |
 | `dashboard/app.js` | Chart rendering (Observable Plot CDN, ES modules) |
@@ -86,6 +102,7 @@ Notion databases have two distinct UUIDs. Using the wrong one will result in a 4
 | `background/service-worker.js` | Extension: chat interception + agent write API |
 | `popup/popup.js` | Extension: UI thin client |
 | `cli/dispatch.py` | Dispatch adapter (v1.1 contract) |
+| `cli/dispatch_tools.py` | Lab dispatch/return MCP tool registration |
 | `cli/contracts/` | JSON schemas + configs for dispatch contract |
 | `cli/test_dispatch.py` | Dispatch adapter unit tests |
 | `cli/agent_instructions/evidence_verifier.md` | Evidence Verifier agent instructions (source of truth) |

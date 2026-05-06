@@ -80,6 +80,29 @@ file-based `update_agent_from_file` tool for long instruction documents. The
 Notion write path is the same, but the MCP request stays small instead of
 embedding the full Markdown body inline.
 
+## MCP Operational Notes
+
+Use `lab_query` for broad read-only Lab questions where a direct database query
+would return a large payload. It runs on MiniMax M2.5
+(`fireworks-minimax-m2.5`) and acts as a compressed, Exa-like query surface over
+Notion. Its answers must preserve the canonical answer set: exact counts should
+state exact totals, matched counts, scanned counts, or limits, and it must not
+call a view/search subset a full database total.
+
+For direct MCP database work, call `describe_database` before `query_database`
+when property names or property types are uncertain. Use `count_database` with
+`exact=True` for precise counts instead of inferring totals from a single
+`query_database` page.
+
+Lab dispatch returns are exposed as two MCP paths:
+
+- `handle_final_return` — normal execution-plane return ingestion when a dispatch
+  packet and `run_id` exist.
+- `direct_closeout_return` — fallback closeout when no GitHub issue, dispatch
+  packet, or trusted `run_id` is available. It generates an idempotency key if
+  needed, appends result blocks, and stamps `Return Received At` /
+  `Return Consumed At` so the Intake Clerk can continue the pipeline.
+
 ## Supported Markdown
 
 The instruction file should be standard Markdown:

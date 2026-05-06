@@ -112,6 +112,9 @@ def _handle_issue_closed(url: str, summary: str):
     Item won't be found (URL cleared) OR it will be found but already in
     the target state — either way skip to avoid a double audit-log entry
     and a redundant Notion write.
+
+    Fetches GitHub issue comments before calling perform_return so that the
+    Intake Clerk sees full evidence rather than a bare close signal (AC-1).
     """
     try:
         token = os.environ.get("NOTION_TOKEN")
@@ -133,8 +136,18 @@ def _handle_issue_closed(url: str, summary: str):
             logger.info("Skipping issue_closed for %s — already Awaiting Intake (PR merge handled it)", url)
             return {"status": "skipped", "reason": "already_awaiting_intake", "work_item_id": work_item["id"]}
 
-        github_return.perform_return(client, work_item["id"], summary)
-        return {"status": "success", "work_item_id": work_item["id"]}
+        # Fetch comments before signalling Intake Clerk (AC-1, AC-3)
+        comments: list[dict] = []
+        parsed = github_return.parse_github_issue_url(url)
+        if parsed:
+            owner, repo, number = parsed
+            comments = github_return.fetch_issue_comments(owner, repo, number)
+            logger.info("Fetched %d comment(s) for %s/%s#%d", len(comments), owner, repo, number)
+        else:
+            logger.warning("Could not parse GitHub issue URL for comment fetch: %s", url)
+
+        evidence_tag = github_return.perform_return(client, work_item["id"], summary, comments=comments)
+        return {"status": "success", "work_item_id": work_item["id"], "evidence": evidence_tag}
     except Exception as e:
         logger.error("Error in _handle_issue_closed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

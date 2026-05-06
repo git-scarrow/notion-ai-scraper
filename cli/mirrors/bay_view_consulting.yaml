@@ -3,5 +3,5 @@
 # Instructions should be saved to mirrors/bay_view_consulting.md
 
 target: bay_view_consulting
-model: chatgpt
+model: apricot-sorbet-high
 instructions: mirrors/bay_view_consulting.md

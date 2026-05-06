@@ -101,10 +101,12 @@ def get_workflow_record(notion_internal_id: str, token_v2: str,
 
 
 MODEL_NAMES = {
+    "apricot-sorbet-high": "Opus 4.7",
     "avocado-froyo-medium": "Opus 4.6",
     "almond-croissant-low": "Sonnet 4.6",
     "anthropic-haiku-4.5": "Haiku 4.5",
     "oatmeal-cookie": "GPT-5.2",
+    "opal-quince-medium": "GPT-5.5",
     "oval-kumquat-medium": "GPT-5.4",
     "otaheite-apple-medium": "GPT-5.4 mini/nano",
     "gingerbread": "Gemini 3 Flash",

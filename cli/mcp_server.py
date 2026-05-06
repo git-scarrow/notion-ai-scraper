@@ -1500,10 +1500,12 @@ def set_agent_model(
 
     agent_name: Registered agent name from agents.yaml.
     model: Model display name or codename. Accepted values:
-      - "opus" / "avocado-froyo-medium" → Opus 4.6
+      - "opus" / "opus 4.7" / "apricot-sorbet-high" → Opus 4.7
+      - "opus 4.6" / "avocado-froyo-medium" → Opus 4.6
       - "sonnet" / "almond-croissant-low" → Sonnet 4.6
       - "haiku" / "anthropic-haiku-4.5" → Haiku 4.5
       - "gpt 5.2" / "oatmeal-cookie" → GPT-5.2
+      - "gpt 5.5" / "opal-quince-medium" → GPT-5.5
       - "gpt 5.4" / "oval-kumquat-medium" → GPT-5.4
       - "gpt 5.4 mini" / "gpt 5.4 nano" / "otaheite-apple-medium" → GPT-5.4 mini/nano
       - "gemini" / "gingerbread" → Gemini 3 Flash
@@ -1514,13 +1516,16 @@ def set_agent_model(
     """
     # Resolve friendly names to codenames
     aliases = {
-        "opus": "avocado-froyo-medium",
+        "opus": "apricot-sorbet-high",
+        "opus 4.7": "apricot-sorbet-high",
         "opus 4.6": "avocado-froyo-medium",
         "sonnet": "almond-croissant-low",
         "sonnet 4.6": "almond-croissant-low",
         "haiku": "anthropic-haiku-4.5",
         "haiku 4.5": "anthropic-haiku-4.5",
-        "chatgpt": "oval-kumquat-medium",
+        "chatgpt": "opal-quince-medium",
+        "gpt 5.5": "opal-quince-medium",
+        "chatgpt 5.5": "opal-quince-medium",
         "chatgpt 5.4": "oval-kumquat-medium",
         "gpt 5.4": "oval-kumquat-medium",
         "gpt 5.4 mini": "otaheite-apple-medium",

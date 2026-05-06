@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the internal design of Notion AI Chat Scraper and the private Notion AI protocol it reverse-engineers.
+This document describes the browser capture/export layer of Notion Forge and the private Notion AI protocol it reverse-engineers.
 
 ## Component overview
 
@@ -117,5 +117,5 @@ Notion uses internal model codenames: `avocado-froyo-medium` (observed). The `mo
 1. Load the extension: `about:debugging` → This Firefox → Load Temporary Add-on → `manifest.json`
 2. Open Browser Console (Ctrl+Shift+J), filter by extension
 3. Open any Notion page, trigger Notion AI
-4. Watch for `[notion-ai-scraper]` log entries
+4. Watch for `[notion-forge]` log entries
 5. DevTools → Network → filter `runInferenceTranscript` to see raw NDJSON

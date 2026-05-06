@@ -1,10 +1,10 @@
-# Notion AI Chat Scraper
+# Notion Forge
 
-[![Lint](https://github.com/samscarrow/notion-ai-scraper/actions/workflows/lint.yml/badge.svg)](https://github.com/samscarrow/notion-ai-scraper/actions/workflows/lint.yml)
+[![Lint](https://github.com/git-scarrow/notion-forge/actions/workflows/lint.yml/badge.svg)](https://github.com/git-scarrow/notion-forge/actions/workflows/lint.yml)
 
-Export your [Notion AI](https://www.notion.so/product/ai) chat conversations as Markdown or JSON — including thinking/chain-of-thought, tool calls, and full conversation history.
+Notion Forge is a reverse-engineered operations toolkit for [Notion AI](https://www.notion.so/product/ai), custom Notion agents, and Notion-backed agent workflows. It combines a browser extension, Tampermonkey userscript, Python CLI, MCP server, dashboard, and dispatch utilities for working with Notion beyond the public API surface.
 
-Notion's built-in AI chat is not covered by generic export tools. This fills that gap.
+The original chat exporter is still here: it captures live and historical Notion AI conversations as Markdown or JSON, including tool calls, model info, thread titles, and conversation structure. The project now also manages custom agent instructions, publishes agent versions, queries workspace data, mirrors Claude.ai Project assets, audits Lab workflow state, and drives programmatic dispatch loops.
 
 ![icon](icons/icon128.png)
 
@@ -14,19 +14,36 @@ Notion's built-in AI chat is not covered by generic export tools. This fills tha
 
 ## Features
 
-- **Live capture** — intercepts AI responses as they stream in
-- **Historical capture** — recovers past conversations when you open them
-- **Full fidelity** — thinking/CoT blocks, tool calls, model info, thread titles
-- **Export** — Markdown (readable) or JSON (machine-readable)
-- **Two delivery methods** — Firefox extension or Tampermonkey userscript
+- **AI conversation capture** — live and historical Notion AI thread capture with Markdown/JSON export
+- **High-fidelity transcripts** — tool calls, model info, thread titles, mentions, and conversation metadata
+- **Custom agent management** — read, update, create, publish, and grant access for Notion AI agents
+- **MCP server** — expose Notion agent, database, dispatch, and Claude Project operations to external agent clients
+- **Operational dashboard** — inspect Notion databases and aggregate workflow state from a local web UI
+- **Lab dispatch plane** — validate gates, build dispatch packets, track final returns, and reconcile workflow state
+- **Claude.ai Project sync** — list, read, upload, delete, and sync Claude Project instructions and documents
+- **Multiple delivery surfaces** — Firefox extension, Tampermonkey userscript, Python CLI, MCP tools, and local dashboard
 
 ---
 
-## Install
+## Components
+
+| Component | Purpose |
+|---|---|
+| `manifest.json`, `background/`, `popup/`, `agent-manager/` | Firefox extension for Notion AI capture/export and browser-side agent management |
+| `tampermonkey/notion-ai-scraper.user.js` | Userscript version of the conversation capture/export path |
+| `cli/mcp_server.py` | MCP server for Notion agents, databases, dispatch workflows, and Claude Project operations |
+| `cli/update_agent.py`, `cli/create_agent.py` | CLI tools for custom Notion agent instruction and publish workflows |
+| `cli/dashboard_server.py`, `dashboard/` | Local dashboard for Notion database inspection and aggregation |
+| `cli/dispatch.py`, `cli/contracts/` | Dispatch contract builder, validation gates, schemas, and return handling |
+| `cli/claude_cli.py`, `cli/claude_client.py` | Claude.ai Project instruction/document sync |
+
+---
+
+## Browser Capture Install
 
 ### Option A: Firefox Extension (recommended)
 
-1. Download the latest `.xpi` from [Releases](https://github.com/samscarrow/notion-ai-scraper/releases)
+1. Download the latest `.xpi` from [Releases](https://github.com/git-scarrow/notion-forge/releases)
 2. In Firefox: `about:addons` → gear icon ⚙️ → **Install Add-on From File...**
 3. Select the `.xpi` — it installs permanently and survives restarts
 
@@ -42,7 +59,9 @@ Notion's built-in AI chat is not covered by generic export tools. This fills tha
 
 ## Usage
 
-**Extension:**
+### Conversation Capture
+
+**Firefox extension:**
 1. Navigate to any Notion AI chat page (`notion.so/...?wfv=chat` or open the AI sidebar)
 2. Click the extension icon in the toolbar
 3. Conversations appear as you open chats — click **Export All → MD** or **JSON**
@@ -56,6 +75,25 @@ Notion's built-in AI chat is not covered by generic export tools. This fills tha
    - `Clear captured conversations`
 
 **To capture historical chats:** open each chat thread in Notion — the extension captures messages as Notion fetches them. Clear Notion's IndexedDB cache (`F12 → Application → Storage → Clear site data`) to force a fresh fetch of all cached messages.
+
+### Agent and Workflow Operations
+
+```bash
+# Dump, update, or publish custom Notion agent instructions
+cli/.venv/bin/python cli/update_agent.py librarian --dump
+cli/.venv/bin/python cli/update_agent.py librarian path/to/instructions.md
+
+# Run the MCP server
+cli/.venv/bin/python cli/mcp_server.py
+
+# Start the local dashboard
+cli/.venv/bin/python cli/dashboard_server.py --port 8099
+
+# Use the Claude Project sync CLI
+cli/.venv/bin/python cli/claude_cli.py --help
+```
+
+See [cli/README.md](cli/README.md), [CLAUDE.md](CLAUDE.md), and [docs/LAB_LOOP_V1_PROTOCOL.md](docs/LAB_LOOP_V1_PROTOCOL.md) for the operational tooling.
 
 ---
 

@@ -43,7 +43,7 @@ class MCPServerTests(unittest.TestCase):
             mcp_server.notion_client,
             "get_workflow_record",
             return_value={"data": {"model": {"type": "auto"}}},
-        ), mock.patch.object(
+        ) as workflow_mock, mock.patch.object(
             mcp_server.notion_client,
             "send_agent_message",
             return_value="msg-1",
@@ -65,6 +65,9 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(
             result["tracking"]["check_agent_response"],
             {"thread_id": "thread-1", "after_msg_id": "msg-1", "space_id": mcp_server.CFG.space_id},
+        )
+        workflow_mock.assert_called_once_with(
+            "wf-1", "token", "user-1", space_id="space-1"
         )
 
     def test_chat_with_agent_caps_wait_to_transport_safe_budget(self) -> None:
@@ -174,6 +177,92 @@ class MCPServerTests(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         impl.assert_called_once_with("librarian", "# Title\n\nBody", True)
+
+    def test_get_agent_config_raw_tools_reads_nested_mcp_state(self) -> None:
+        registry = {
+            "lab_query": {
+                "label": "Lab Query",
+                "notion_internal_id": "wf-1",
+                "notion_public_id": "public-1",
+                "space_id": "space-1",
+            }
+        }
+        modules = [
+            {
+                "name": "Notion",
+                "type": "notion",
+                "permissions": [
+                    {
+                        "actions": ["reader"],
+                        "identifier": {"type": "workspacePublic"},
+                    },
+                    {
+                        "actions": ["reader"],
+                        "identifier": {
+                            "type": "pageOrCollectionViewBlock",
+                            "blockId": "page-1",
+                        },
+                    },
+                ],
+            },
+            {
+                "name": "Lab Control Plane",
+                "type": "mcpServer",
+                "state": {
+                    "serverUrl": "https://mcp.example.test/mcp/notion",
+                    "officialName": "Notion API",
+                    "preferredTransport": "streamableHttp",
+                    "connectionPointer": {"id": "conn-1"},
+                    "enabledToolNames": [
+                        "API-query-data-source",
+                        "API-retrieve-a-data-source",
+                    ],
+                    "tools": [
+                        {
+                            "name": "API-query-data-source",
+                            "title": "Query Data Source",
+                        },
+                        {
+                            "name": "API-retrieve-a-data-source",
+                            "title": "Retrieve A Data Source",
+                        },
+                        {
+                            "name": "API-retrieve-a-database",
+                            "title": "Retrieve A Database",
+                        },
+                    ],
+                },
+            },
+        ]
+
+        with mock.patch.object(mcp_server, "_load_registry", return_value=registry), mock.patch.object(
+            mcp_server,
+            "_get_auth",
+            return_value=("token", "user-1"),
+        ), mock.patch.object(
+            mcp_server.notion_client,
+            "get_workflow_record",
+            return_value={"data": {"model": {"type": "fireworks-minimax-m2.5"}}},
+        ), mock.patch.object(
+            mcp_server.notion_client,
+            "get_agent_modules",
+            return_value={
+                "model": "fireworks-minimax-m2.5",
+                "model_name": "MiniMax M2.5",
+                "modules": modules,
+            },
+        ):
+            result = mcp_server.get_agent_config_raw("lab_query", section="tools")
+
+        self.assertIn("Model: MiniMax M2.5 (fireworks-minimax-m2.5)", result)
+        self.assertIn("[MCP] Lab Control Plane (Notion API)", result)
+        self.assertIn("URL: https://mcp.example.test/mcp/notion", result)
+        self.assertIn("Connection ID: conn-1", result)
+        self.assertIn("Enabled: 2/3 tools", result)
+        self.assertIn("[ON] API-query-data-source: Query Data Source", result)
+        self.assertIn("[off] API-retrieve-a-database: Retrieve A Database", result)
+        self.assertIn("Workspace public pages — reader", result)
+        self.assertIn("page-1 — reader", result)
 
     def test_build_update_message_formats_counts(self) -> None:
         msg = mcp_server._build_update_message(

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Notion AI Chat Scraper",
+  "name": "Notion Forge",
   "version": "0.7.0",
-  "description": "Captures and exports Notion AI chat conversations as Markdown or JSON.",
+  "description": "Notion Forge browser tools for Notion AI capture, export, and agent management.",
 
   "permissions": [
     "storage",
@@ -27,7 +27,7 @@
 
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "Notion AI Scraper",
+    "default_title": "Notion Forge",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

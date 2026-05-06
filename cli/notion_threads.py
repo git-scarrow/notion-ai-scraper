@@ -458,7 +458,9 @@ def find_stale_trigger_threads(notion_internal_id: str, space_id: str,
                                token_v2: str, user_id: str | None = None,
                                limit: int = 100) -> dict:
     threads = list_workflow_threads(notion_internal_id, space_id, token_v2, user_id, limit=limit)
-    wf = notion_agent_config.get_workflow_record(notion_internal_id, token_v2, user_id)
+    wf = notion_agent_config.get_workflow_record(
+        notion_internal_id, token_v2, user_id, space_id=space_id
+    )
     current_artifact = ((wf.get("data") or {}).get("published_artifact_pointer") or {}).get("id")
 
     stale_threads = []
@@ -645,7 +647,9 @@ def create_workflow_thread(notion_internal_id: str, space_id: str,
     title_msg_id = str(uuid.uuid4())
     now_ms = int(time.time() * 1000)
 
-    wf = notion_agent_config.get_workflow_record(notion_internal_id, token_v2, user_id)
+    wf = notion_agent_config.get_workflow_record(
+        notion_internal_id, token_v2, user_id, space_id=space_id
+    )
     wf_data = wf.get("data") or {}
 
     thread_data: dict[str, Any] = {

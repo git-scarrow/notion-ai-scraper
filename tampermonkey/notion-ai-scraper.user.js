@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Notion AI Chat Scraper
+// @name         Notion Forge
 // @namespace    https://github.com/git-scarrow/notion-forge
 // @version      0.3.2
-// @description  Export your Notion AI chat conversations as Markdown or JSON. Captures live streaming responses and full historical threads, including chain-of-thought, tool calls, and model info.
+// @description  Notion Forge userscript for capturing and exporting Notion AI conversations as Markdown or JSON, including live responses, historical threads, tool calls, and model info.
 // @author       samscarrow
 // @homepageURL  https://github.com/git-scarrow/notion-forge
 // @supportURL   https://github.com/git-scarrow/notion-forge/issues

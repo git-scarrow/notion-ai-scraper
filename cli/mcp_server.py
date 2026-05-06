@@ -994,7 +994,9 @@ def chat_with_agent(agent_name: str, message: str, thread_id: str | None = None,
 
     # Read model from the live workflow record (what set_agent_model sets),
     # not from agents.yaml which never has a model field.
-    wf = notion_client.get_workflow_record(cfg['notion_internal_id'], token, user_id)
+    wf = notion_client.get_workflow_record(
+        cfg['notion_internal_id'], token, user_id, space_id=cfg['space_id']
+    )
     model_type = (wf.get('data', {}).get('model') or {}).get('type') or 'auto'
 
     msg_id = notion_client.send_agent_message(
@@ -1300,7 +1302,9 @@ def get_triggers(
         return "\n\n".join(lines)
 
     cfg = _get_agent_config(agent)
-    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
+    wf = notion_client.get_workflow_record(
+        cfg["notion_internal_id"], token, user_id, space_id=cfg["space_id"]
+    )
     triggers = wf.get("data", {}).get("triggers", [])
     name = wf.get("data", {}).get("name", agent)
     trigger_lines = _format_agent_triggers(triggers)
@@ -1441,7 +1445,9 @@ def configure_agent_mcp(
     """
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
-    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
+    wf = notion_client.get_workflow_record(
+        cfg["notion_internal_id"], token, user_id, space_id=cfg["space_id"]
+    )
     modules = wf.get("data", {}).get("modules", [])
 
     if action == "add":
@@ -1536,6 +1542,9 @@ def set_agent_model(
         "chatgpt 5.2": "oatmeal-cookie",
         "gemini": "gingerbread",
         "gemini 3 flash": "gingerbread",
+        "minimax": "fireworks-minimax-m2.5",
+        "minimax m2.5": "fireworks-minimax-m2.5",
+        "minimax 2.5": "fireworks-minimax-m2.5",
         "auto": "auto",
     }
     model_type = aliases.get(model.lower().strip(), model.strip())
@@ -1624,17 +1633,27 @@ def get_agent_config_raw(agent_name: str, section: str = "all") -> str:
     """
     cfg = _get_agent_config(agent_name)
     token, user_id = _get_auth()
-    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
+    wf = notion_client.get_workflow_record(
+        cfg["notion_internal_id"], token, user_id, space_id=cfg["space_id"]
+    )
 
     if section == "modules":
         modules = wf.get("data", {}).get("modules", [])
         return json.dumps(modules, indent=2, ensure_ascii=False)
 
     if section == "tools":
-        result = notion_client.get_agent_modules(cfg["notion_internal_id"], token, user_id)
+        result = notion_client.get_agent_modules(
+            cfg["notion_internal_id"], token, user_id, space_id=cfg["space_id"]
+        )
         lines = [f"Agent: {cfg.get('label', agent_name)}"]
         model = result.get("model", {})
-        lines.append(f"Model: {model.get('display', '?')} ({model.get('type', '?')})")
+        if isinstance(model, dict):
+            model_display = model.get("display", "?")
+            model_type = model.get("type", "?")
+        else:
+            model_type = str(model)
+            model_display = result.get("model_name", model_type)
+        lines.append(f"Model: {model_display} ({model_type})")
         lines.append("")
         for mod in result.get("modules", []):
             mtype = mod.get("type", "?")
@@ -1642,31 +1661,48 @@ def get_agent_config_raw(agent_name: str, section: str = "all") -> str:
             if mtype == "notion":
                 lines.append(f"[Notion] {name}")
                 for perm in mod.get("permissions", []):
-                    scope = perm.get("scope", "?")
+                    identifier = perm.get("identifier", {})
+                    scope = perm.get("scope") or identifier.get("type", "?")
                     actions = ", ".join(perm.get("actions", []))
                     if scope == "workspacePublic":
                         lines.append(f"  Workspace public pages — {actions}")
                     else:
-                        page = perm.get("pageName", perm.get("blockId", "?"))
+                        page = (
+                            perm.get("pageName")
+                            or perm.get("blockId")
+                            or identifier.get("blockId")
+                            or identifier.get("databaseId")
+                            or "?"
+                        )
                         lines.append(f"  {page} — {actions}")
             elif mtype == "mcpServer":
-                url = mod.get("serverUrl", "?")
-                official = mod.get("officialName", "")
-                transport = mod.get("preferredTransport", "?")
-                auto_write = mod.get("runWriteToolsAutomatically", False)
-                enabled = mod.get("enabledToolNames", [])
-                total = mod.get("totalTools", 0)
-                conn_id = mod.get("connectionId", "")
+                state = mod.get("state", {})
+                url = mod.get("serverUrl") or state.get("serverUrl", "?")
+                official = mod.get("officialName") or state.get("officialName", "")
+                transport = mod.get("preferredTransport") or state.get("preferredTransport", "?")
+                auto_write = mod.get("runWriteToolsAutomatically", state.get("runWriteToolsAutomatically", False))
+                enabled = mod.get("enabledToolNames") or state.get("enabledToolNames", [])
+                enabled_names = [
+                    item.get("name", "")
+                    if isinstance(item, dict)
+                    else str(item)
+                    for item in enabled
+                ]
+                tools = mod.get("tools") or state.get("tools", [])
+                total = mod.get("totalTools", len(tools))
+                conn = mod.get("connectionPointer") or state.get("connectionPointer", {})
+                conn_id = mod.get("connectionId") or conn.get("id", "")
                 label = f"[MCP] {name}" + (f" ({official})" if official else "")
                 lines.append(label)
                 lines.append(f"  URL: {url}  Transport: {transport}  Auto-run writes: {auto_write}")
                 if conn_id:
                     lines.append(f"  Connection ID: {conn_id}")
-                lines.append(f"  Enabled: {len(enabled)}/{total} tools")
-                enabled_set = set(enabled)
-                for t in mod.get("tools", []):
-                    status = "ON" if t["name"] in enabled_set else "off"
-                    lines.append(f"    [{status}] {t['name']}: {t['title']}")
+                lines.append(f"  Enabled: {len(enabled_names)}/{total} tools")
+                enabled_set = set(enabled_names)
+                for t in tools:
+                    tool_name = t.get("name", "?")
+                    status = "ON" if tool_name in enabled_set else "off"
+                    lines.append(f"    [{status}] {tool_name}: {t.get('title', tool_name)}")
             elif mtype == "mail":
                 emails = ", ".join(mod.get("emailAddresses", []))
                 scopes = ", ".join(mod.get("scopes", []))

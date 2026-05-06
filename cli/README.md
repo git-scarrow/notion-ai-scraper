@@ -70,7 +70,7 @@ def update_notion_agent(agent_name: str, instructions_markdown: str) -> str:
     result = subprocess.run(
         ['python', 'cli/update_agent.py', agent_name, tmp],
         capture_output=True, text=True,
-        cwd='/home/sam/projects/notion-ai-scraper'
+        cwd='/home/sam/projects/notion-forge'
     )
     return result.stdout + result.stderr
 ```

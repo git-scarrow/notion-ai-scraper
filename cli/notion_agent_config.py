@@ -90,8 +90,9 @@ def get_all_workspace_agents(space_id: str, token_v2: str,
 
 
 def get_workflow_record(notion_internal_id: str, token_v2: str,
-                        user_id: str | None = None) -> dict:
-    records = read_records("workflow", [notion_internal_id], token_v2, user_id)
+                        user_id: str | None = None,
+                        space_id: str | None = None) -> dict:
+    records = read_records("workflow", [notion_internal_id], token_v2, user_id, space_id=space_id)
     if notion_internal_id not in records:
         raise RuntimeError(
             f"Workflow {notion_internal_id} not found or inaccessible. "
@@ -148,8 +149,9 @@ def _resolve_page_names(notion_public_ids: list[str], token_v2: str,
 
 
 def get_agent_modules(notion_internal_id: str, token_v2: str,
-                      user_id: str | None = None) -> dict:
-    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id)
+                      user_id: str | None = None,
+                      space_id: str | None = None) -> dict:
+    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id, space_id=space_id)
     wf_data = wf_record.get("data", {})
     tools = wf_data.get("tools", [])
 
@@ -166,6 +168,8 @@ def get_agent_modules(notion_internal_id: str, token_v2: str,
     has_mail = False
     has_calendar = False
     model = wf_data.get("model") or "unknown"
+    if isinstance(model, dict):
+        model = model.get("type") or "unknown"
     model_name = MODEL_NAMES.get(model, model)
 
     for mod in modules:
@@ -251,13 +255,14 @@ def _get_notion_module(modules: list) -> dict | None:
 
 
 def _get_granted_page_ids(notion_internal_id: str, token_v2: str,
-                          user_id: str | None = None) -> set[str]:
+                          user_id: str | None = None,
+                          space_id: str | None = None) -> set[str]:
     """Return the set of page UUIDs currently granted to an agent.
 
     Grants are stored as permissions in modules[type=notion].permissions[]
     with identifier.type = 'pageOrCollectionViewBlock'.
     """
-    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id)
+    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id, space_id=space_id)
     modules = wf_record.get("data", {}).get("modules", [])
     notion_mod = _get_notion_module(modules)
     if not notion_mod:
@@ -321,7 +326,7 @@ def grant_agent_resource_access(
             "Cannot grant access to a dead or missing page."
         )
 
-    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id)
+    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id, space_id=space_id)
     modules = wf_record.get("data", {}).get("modules", [])
     notion_mod = _get_notion_module(modules)
 
@@ -360,13 +365,13 @@ def ensure_mention_access(
     if not mentioned:
         return []
 
-    granted = _get_granted_page_ids(notion_internal_id, token_v2, user_id)
+    granted = _get_granted_page_ids(notion_internal_id, token_v2, user_id, space_id=space_id)
     missing = mentioned - granted
     if not missing:
         return []
 
     # Re-fetch to get current modules for mutation
-    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id)
+    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id, space_id=space_id)
     modules = wf_record.get("data", {}).get("modules", [])
     notion_mod = _get_notion_module(modules)
 
@@ -599,7 +604,7 @@ def diagnose_publish_failure(
     Strips all page permissions, publishes (should succeed), then tests
     each permission individually to find the blockers.
     """
-    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id)
+    wf_record = get_workflow_record(notion_internal_id, token_v2, user_id, space_id=space_id)
     modules = wf_record.get("data", {}).get("modules", [])
     notion_mod = _get_notion_module(modules)
     if not notion_mod:

@@ -69,6 +69,19 @@ class NotionClientTests(unittest.TestCase):
 
         self.assertEqual(read_mock.call_args.kwargs["space_id"], "space-1")
 
+    def test_get_workflow_record_passes_space_id_to_record_read(self) -> None:
+        with mock.patch.object(
+            notion_agent_config,
+            "read_records",
+            return_value={"workflow-1": {"id": "workflow-1"}},
+        ) as read_mock:
+            result = notion_client.get_workflow_record(
+                "workflow-1", "token", "user-1", space_id="space-1"
+            )
+
+        self.assertEqual(result["id"], "workflow-1")
+        self.assertEqual(read_mock.call_args.kwargs["space_id"], "space-1")
+
     def test_wait_for_agent_response_returns_none_when_only_partial_output_exists(self) -> None:
         with mock.patch.object(
             notion_threads,

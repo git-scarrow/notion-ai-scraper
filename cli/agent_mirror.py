@@ -93,7 +93,9 @@ def read_live_state(agent_name: str) -> dict:
     token, user_id = _get_auth()
 
     # Get workflow record for model + modules
-    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
+    wf = notion_client.get_workflow_record(
+        cfg["notion_internal_id"], token, user_id, space_id=cfg["space_id"]
+    )
     data = wf.get("data", {})
 
     # Read instructions
@@ -316,7 +318,9 @@ def _add_mcp_server(cfg: dict, token: str, user_id: str | None,
                     name: str, url: str) -> None:
     """Add an MCP server module to the agent."""
     import uuid as _uuid
-    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
+    wf = notion_client.get_workflow_record(
+        cfg["notion_internal_id"], token, user_id, space_id=cfg["space_id"]
+    )
     modules = wf.get("data", {}).get("modules", [])
     modules.append({
         "id": str(_uuid.uuid4()),
@@ -333,7 +337,9 @@ def _add_mcp_server(cfg: dict, token: str, user_id: str | None,
 def _remove_mcp_server(cfg: dict, token: str, user_id: str | None,
                        name: str, url: str) -> None:
     """Remove an MCP server module by URL match."""
-    wf = notion_client.get_workflow_record(cfg["notion_internal_id"], token, user_id)
+    wf = notion_client.get_workflow_record(
+        cfg["notion_internal_id"], token, user_id, space_id=cfg["space_id"]
+    )
     modules = wf.get("data", {}).get("modules", [])
     filtered = [
         m for m in modules

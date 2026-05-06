@@ -1,5 +1,5 @@
 /**
- * Notion AI Scraper — Background Service Worker
+ * Notion Forge — Background Service Worker
  *
  * Receives parsed transcript data via native webRequest interception,
  * stores conversation turns, and handles export.

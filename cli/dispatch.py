@@ -25,6 +25,7 @@ import yaml
 
 import notion_api
 from config import get_config
+from transitions import record_event
 
 # ── Contract configs (loaded once) ───────────────────────────────────────────
 
@@ -816,6 +817,17 @@ def accept_dispatch_start(
         # Audit log failure should not block dispatch
         pass
 
+    try:
+        record_event(
+            "dispatch.accepted",
+            work_item_id,
+            run_id=run_id,
+            actor="lab_dispatcher",
+            payload={"prior_status": current_status or ""},
+        )
+    except Exception:
+        pass
+
     return {"status": "consumed", "work_item_id": work_item_id, "run_id": run_id, "consumed_at": now}
 
 
@@ -1071,6 +1083,17 @@ def handle_final_return(
 
     client.update_page(work_item_id, update_props)
 
+    try:
+        record_event(
+            "return.received",
+            work_item_id,
+            run_id=run_id,
+            actor=lane or "execution_plane",
+            payload={"status": status, "verdict": verdict, "model": model},
+        )
+    except Exception:
+        pass
+
     # ── Append content blocks to page body ────────────────────────────
     content_blocks: list[dict[str, Any]] = []
 
@@ -1190,6 +1213,16 @@ def direct_closeout_return(
     so the Work Item body and return timestamps still look like normal returns.
     """
     generated_run_id = run_id or f"direct-closeout-{uuid.uuid4()}"
+    try:
+        record_event(
+            "return.direct_closeout",
+            work_item_id,
+            run_id=generated_run_id,
+            actor="direct_closeout",
+            payload={"status": status, "verdict": verdict, "lane": lane},
+        )
+    except Exception:
+        pass
     return handle_final_return(
         work_item_id=work_item_id,
         run_id=generated_run_id,

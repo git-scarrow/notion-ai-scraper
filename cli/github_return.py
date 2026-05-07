@@ -17,6 +17,8 @@ import argparse
 import subprocess
 from typing import Any
 
+from transitions import record_event
+
 try:
     from . import notion_api, config
 except ImportError:
@@ -160,6 +162,17 @@ def perform_return(
         )
     except Exception as e:
         print(f"WARNING: Audit log write failed (non-fatal): {e}")
+
+    try:
+        record_event(
+            "github.closeout",
+            page_id,
+            run_id=None,
+            actor="github_webhook",
+            payload={"evidence": evidence_tag, "status": target_status},
+        )
+    except Exception:
+        pass
 
     return evidence_tag
 

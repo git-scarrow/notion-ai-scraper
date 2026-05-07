@@ -31,6 +31,10 @@ import notion_api
 import notion_client
 import config
 import lab_topology
+import graph_export
+from connections import register_connection_tools
+from transitions import register_transition_tools
+from tool_catalog import register_tool_metadata
 from utils import _to_dashed_uuid, _name_to_key
 
 # Use config instance
@@ -1829,6 +1833,14 @@ def grant_resource_access(
 if CFG and CFG.has_lab_config:
     import dispatch_tools
     dispatch_tools.register(mcp, CFG)
+
+
+register_connection_tools(mcp)
+register_transition_tools(mcp)
+graph_export.register_graph_tools(mcp)
+
+from tool_catalog import register_lab_query_tools
+register_lab_query_tools(mcp)
 
 
 def _sync_mirrors_background():

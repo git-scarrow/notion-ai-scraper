@@ -57,6 +57,21 @@ cli/.venv/bin/python -c "import sys; sys.path.insert(0,'cli'); import notion_cli
 - Canonicality contract: compressed answers must preserve the answer set. Counts and distributions must state scope (`exact total`, `matched count`, `scanned count`, or `limit`) and must not call a view/search subset a database total.
 - Known-good smoke check: `chat_with_agent(lab_query, "In Work Items, how many total rows are there, and how many have Status = Dispatch Ready? Use exact counts. Return one sentence only.", new_thread=True, wait=True)` should return `Work Items: 581 total; Dispatch Ready: 22.`
 - Live configuration should show `Lab Control Plane (Notion API)` with `Enabled: 22/22 tools`, including `API-query-data-source`, `API-retrieve-a-data-source`, and `API-retrieve-a-database`.
+- Source-of-truth instructions live at `cli/agent_instructions/lab_query.md`. Programmatic publishing is paused for maintenance; edits to the file do not auto-republish to the live agent.
+- The `lab_query_tool_catalog()` MCP tool returns the agent's safe-tool allowlist, canonical-read list, approval-gated list, and the four required scope labels — the agent reads its own contract from this surface.
+
+## Tool Catalog & Operational Surfaces
+
+Magpie synthesis (commit `d20e535`, May 2026) added four typed surfaces alongside the existing tools:
+
+- **Tool catalog** (`cli/tool_catalog.py`) — per-tool metadata: surface, access, idempotency, latency, `safe_for_lab_query`, `canonical_read`, `human_approval_required`. Drives Lab Query's allowlist and lets callers ask "which tools are safe / canonical / write-class". Per-tool decorator opt-in via `register_tool_metadata(mcp, ...)` is a one-liner; the catalog is queryable today even without per-tool swaps.
+- **Connection records** (`cli/connections.py`) — read-only inspection of auth surfaces (Firefox cookie, env var, token file). MCP tools: `inspect_connections`, `connection_health`. Never reads token bytes — `present: True` is the only positive signal. Reports freshness so stale tokens become visible.
+- **Transition log** (`cli/transitions.py`) — sqlite event-sourced mirror at `~/.local/share/notion-forge/transitions.db`. Deterministic 16-char IDs (sha256 of work_item + event_type + run_id + timestamp), `prev_event_id` chain, idempotent inserts. Hooks at 4 sites in `dispatch.py` / `github_return.py`; failures swallowed so the Notion write path is never blocked. MCP tools: `transition_events`, `transition_replay_check`. Detects `return_without_dispatch`, `out_of_order`, `broken_chain`, `duplicate_run_id` anomalies. Intake Clerk's `intake.triggered` event is TBD — that automation runs inside Notion.
+- **Graph export** (`cli/graph_export.py`) — consumes `lab_topology.compile_snapshot()` and emits deterministic node/edge graphs as JSON, DOT, or Mermaid. MCP tools: `lab_graph(format=...)`, `lab_graph_drift(prev_path)`. Baseline lives at `cli/lab_graph_baseline.json`; rebuild with `from_snapshot(compile_snapshot())` and diff for topology drift checks.
+
+## Auth Cascade
+
+`_get_auth()` in `cli/mcp_server.py` resolves token_v2 from three sources in priority order: `NOTION_TOKEN_V2` env → `~/.notion-token-v2` file → Firefox `cookies.sqlite`. As of `43ec34b` (May 2026), the token file is treated as a warm cache, not a source of truth: if Firefox cookies.sqlite has a newer mtime than the token file, the cascade falls through to extraction (which rewrites the file). This prevents the file shadowing a rotated Firefox token. Firefox-unreachable still falls back to the file via the existing `FileNotFoundError` path.
 
 ## Dispatch Returns
 
@@ -106,6 +121,14 @@ Notion databases have two distinct UUIDs. Using the wrong one will result in a 4
 | `cli/contracts/` | JSON schemas + configs for dispatch contract |
 | `cli/test_dispatch.py` | Dispatch adapter unit tests |
 | `cli/agent_instructions/evidence_verifier.md` | Evidence Verifier agent instructions (source of truth) |
+| `cli/agent_instructions/lab_query.md` | Lab Query agent instructions (canonicality contract — paused publish) |
+| `cli/tool_catalog.py` | Typed MCP tool metadata + Lab Query allowlist surface |
+| `cli/connections.py` | Auth surface inspection (`inspect_connections`, `connection_health`) |
+| `cli/transitions.py` | Durable transition event log (sqlite) |
+| `cli/graph_export.py` | Lab topology graph emission (JSON/DOT/Mermaid) + drift diff |
+| `cli/lab_query_contract.py` | Count-answer scope-label validator |
+| `cli/lab_graph_baseline.json` | Persisted topology baseline for `lab_graph_drift` |
+| `cli/INTEGRATION_*.md` | Per-module integration notes for the Magpie surfaces |
 | `cli/claude_cli.py` | Claude.ai Project sync CLI |
 | `cli/claude_client.py` | Claude.ai Projects API client (internal web API) |
 | `cli/claude_cookie_extract.py` | Firefox cookie extraction for Claude.ai auth |

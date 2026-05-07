@@ -21,6 +21,10 @@ The original chat exporter is still here: it captures live and historical Notion
 - **Compressed Lab querying** — delegate broad Notion questions to `lab_query`, a MiniMax M2.5 query agent that returns canonical answers without flooding context with raw database JSON
 - **Operational dashboard** — inspect Notion databases and aggregate workflow state from a local web UI
 - **Lab dispatch plane** — validate gates, build dispatch packets, ingest normal and fallback returns, and reconcile workflow state
+- **Typed tool catalog** — per-tool metadata (surface, access, idempotency, latency, lab-query safety, approval gating) drives Lab Query's allowlist
+- **Connection inspection** — read-only auth surface records (`inspect_connections`, `connection_health`) report freshness without reading token bytes
+- **Durable transition log** — sqlite event-sourced mirror of dispatch/return events with deterministic IDs, replay checks, and anomaly detection
+- **Lab topology graph** — deterministic node/edge export of agents, triggers, tools, and databases as JSON / DOT / Mermaid, plus drift diff
 - **Claude.ai Project sync** — list, read, upload, delete, and sync Claude Project instructions and documents
 - **Multiple delivery surfaces** — Firefox extension, Tampermonkey userscript, Python CLI, MCP tools, and local dashboard
 
@@ -36,6 +40,8 @@ The original chat exporter is still here: it captures live and historical Notion
 | `cli/update_agent.py`, `cli/create_agent.py` | CLI tools for custom Notion agent instruction and publish workflows |
 | `cli/dashboard_server.py`, `dashboard/` | Local dashboard for Notion database inspection and aggregation |
 | `cli/dispatch.py`, `cli/dispatch_tools.py`, `cli/contracts/` | Dispatch contract builder, validation gates, schemas, MCP tools, and return handling |
+| `cli/tool_catalog.py`, `cli/connections.py`, `cli/transitions.py`, `cli/graph_export.py` | Typed tool metadata, auth surface inspection, durable transition log, and lab topology graph export |
+| `cli/lab_query_contract.py` | Count-answer scope-label validator for Lab Query responses |
 | `cli/claude_cli.py`, `cli/claude_client.py` | Claude.ai Project instruction/document sync |
 
 ---

@@ -32,13 +32,15 @@ or:
 sra-imp-1
 ```
 
+Branch-name handles are case-insensitive. Lowercase is preferred for branch names, even when the Work Item handle is displayed uppercase in Notion.
+
 Existing substantial work on a noncanonical branch is acceptable when all of these are true:
 
 1. The branch maps cleanly to one Work Item.
 2. The branch is pushed or otherwise inspectable.
 3. The Work Item records the actual branch name in `Branch`.
 4. The issue or PR title/body references the Work Item handle.
-5. The branch passes the Work Item objective, stop condition, metrics, and acceptance checks.
+5. The branch passes the Work Item objective, `Kill/Stop Condition`, metrics, and acceptance checks.
 
 Branch-name mismatch is metadata, not failure.
 
@@ -62,7 +64,7 @@ The `branch` field in a dispatch packet means the actual execution branch, not n
 
 If the Work Item `Branch` property is populated, execution agents should treat that value as authoritative.
 
-If the Work Item `Branch` property is empty, execution agents may default to `main` for read-only/audit work or create a preferred branch for new code work.
+If the Work Item `Branch` property is empty, the control plane dispatches `branch=main` for non-sandbox items. Execution agents should follow the dispatch packet. Creating a new preferred branch for implementation work requires setting the Work Item `Branch` property before dispatch.
 
 ## PR convention
 

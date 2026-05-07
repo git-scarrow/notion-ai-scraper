@@ -232,13 +232,24 @@ def _get_auth(force: bool = False) -> tuple[str, str | None]:
             _AUTH_SOURCE = "env"
             return _auth_cache
 
-        # Source 2: token file
+        # Source 2: token file — but only if Firefox cookies.sqlite is not newer.
+        # Otherwise the file shadows a rotated live token and goes silently stale.
         file_auth = _read_token_file()
         if file_auth and not force:
-            _auth_cache = file_auth
-            _auth_cache_time = now
-            _AUTH_SOURCE = "file"
-            return _auth_cache
+            file_is_fresh = True
+            try:
+                file_mtime = os.path.getmtime(_TOKEN_FILE)
+                db_path = cookie_extract.get_firefox_cookies_db()
+                db_mtime = os.path.getmtime(db_path)
+                if db_mtime > file_mtime:
+                    file_is_fresh = False
+            except Exception:
+                pass  # Firefox unreachable → trust the file
+            if file_is_fresh:
+                _auth_cache = file_auth
+                _auth_cache_time = now
+                _AUTH_SOURCE = "file"
+                return _auth_cache
 
         # Source 3: Firefox cookies
         try:
